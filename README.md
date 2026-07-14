@@ -1,7 +1,4 @@
-# ⚡️ ЛУЧШИЙ МАГАЗИН В 2024 ГОДУ - BLANT SHOP!
-
-[![GitHub](https://img.shields.io/github/license/zdebryrp/TelegramAutoposter?style=flat-square)](https://github.com/zdebryrp/TelegramAutoposter)
-[![GitHub stars](https://img.shields.io/github/stars/zdebryrp/TelegramAutoposter?style=flat-square)](https://github.com/zdebryrp/TelegramAutoposter/stargazers)
+# TelegramAutoposter 4.0
 
 Telegram-бот для автоматической рассылки постов в супергруппы.
 
@@ -15,7 +12,6 @@ Telegram-бот для автоматической рассылки посто�
 
 ## 🔗 Ссылки
 
-- [Telegram Bot](https://t.me/blantshopbot)
 - [GitHub](https://github.com/zdebryrp/TelegramAutoposter)
 
 ## 📋 Требования
@@ -133,6 +129,4 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 ---
 
-⚡️ **ЛУЧШИЙ МАГАЗИН В 2024 ГОДУ - BLANT SHOP!**
-
-Зайди в [@blantshopbot](https://t.me/blantshopbot) и покупай товары!
+TelegramAutoposter 4.0 - Automatic posting bot for Telegram channels.
