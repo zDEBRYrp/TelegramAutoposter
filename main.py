@@ -61,7 +61,6 @@ def welcome_keyboard():
 
 
 def post_settings_keyboard():
-    settings = db.settings()
     keyboard = ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text='Изменить текст'), KeyboardButton(text='Изменить фото')],
         [KeyboardButton(text='Изменить видео'), KeyboardButton(text='Удалить медиа')],
@@ -70,20 +69,42 @@ def post_settings_keyboard():
     return keyboard
 
 
-def channel_settings_keyboard():
-    keyboard = ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text='Список чатов'), KeyboardButton(text='Добавить чат')],
-        [KeyboardButton(text='Удалить чат'), KeyboardButton(text='Вернуться')]
-    ], resize_keyboard=True)
-    return keyboard
+def get_chats_keyboard(page=0):
+    chats = asyncio.get_event_loop().run_until_complete(user.get_chats()) if user else []
+    per_page = 10
+    start = page * per_page
+    end = start + per_page
+    page_chats = chats[start:end]
+    
+    keyboard = []
+    for chat in page_chats:
+        keyboard.append([
+            InlineKeyboardButton(text=f'❌ {chat["title"]}', callback_data=f'DELETE_CHAT:{chat["id"]}'),
+            InlineKeyboardButton(text=f'⚙️ {chat["title"]}', callback_data=f'EDIT_CHAT:{chat["id"]}')
+        ])
+    
+    if len(chats) > per_page:
+        pagination = []
+        total_pages = (len(chats) + per_page - 1) // per_page
+        if page > 0:
+            pagination.append(InlineKeyboardButton(text='⬅️', callback_data=f'CHATS_PAGE:{page-1}'))
+        pagination.append(InlineKeyboardButton(text=f'{page+1}/{total_pages}', callback_data='PAGINATION'))
+        if page < total_pages - 1:
+            pagination.append(InlineKeyboardButton(text='➡️', callback_data=f'CHATS_PAGE:{page+1}'))
+        keyboard.append(pagination)
+    
+    keyboard.append([InlineKeyboardButton(text='➕ Добавить чат', callback_data='ADD_CHAT')])
+    
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-def chat_management_keyboard():
+def get_chat_settings_keyboard(chat_id):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text='Настройки чата', callback_data='MANAGE_CHATS')],
-            [InlineKeyboardButton(text='Настройки по умолчанию', callback_data='DEFAULT_SETTINGS')],
-            [InlineKeyboardButton(text='Канальные посты', callback_data='CHANNEL_POSTS')]
+            [InlineKeyboardButton(text='Изменить задержку', callback_data=f'CHANGE_TIMEOUT:{chat_id}')],
+            [InlineKeyboardButton(text='Изменить пост', callback_data=f'EDIT_CHANNEL_POST:{chat_id}')],
+            [InlineKeyboardButton(text='Доп. текст', callback_data=f'ADD_ADDITIONAL:{chat_id}')],
+            [InlineKeyboardButton(text='❌ Удалить чат', callback_data=f'LFC:{chat_id}')]
         ]
     )
     return keyboard
@@ -238,32 +259,9 @@ async def interval_settings(message: Message):
 
 @router.message(F.text == 'Настройки чатов')
 async def chat_settings_menu(message: Message):
-    await message.answer('Управление чатами:', reply_markup=channel_settings_keyboard())
-
-
-@router.message(F.text == 'Список чатов')
-async def list_chats(message: Message):
     chats = await user.get_chats() if user else []
-    if not chats:
-        await message.answer('Нет доступных чатов.')
-        return
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=f'{_["title"]}', callback_data=f'CHAT_SETTINGS:{_["id"]}')]
-            for _ in chats
-        ]
-    )
+    keyboard = get_chats_keyboard(0)
     await message.answer('Все доступные чаты:', reply_markup=keyboard)
-
-
-@router.message(F.text == 'Добавить чат')
-async def add_chat(message: Message):
-    await message.answer('Отправьте ID чата для добавления:')
-
-
-@router.message(F.text == 'Удалить чат')
-async def remove_chat(message: Message):
-    await message.answer('Отправьте ID чата для удаления:')
 
 
 @router.message(F.text == 'Канальные посты')
@@ -300,86 +298,101 @@ async def return_menu(message: Message):
 
 @router.callback_query(F.data)
 async def callback_handler(c: CallbackQuery, state: FSMContext):
-    if 'CHAT_SETTINGS:' in c.data:
-        channel_id = int(c.data.split(':')[1])
-        try:
-            addit_text = db.get_additional_text(channel_id)
-            addit_text_value = addit_text[0] if addit_text else None
-            post_data = db.get_channel_post(channel_id)
-        except Exception as e:
-            logger.error(f"Ошибка получения данных: {e}")
-            addit_text_value = None
-            post_data = None
+    if 'CHATS_PAGE:' in c.data:
+        page = int(c.data.split(':')[1])
+        keyboard = get_chats_keyboard(page)
+        await c.message.edit_reply_markup(reply_markup=keyboard)
+        
+    elif 'DELETE_CHAT:' in c.data:
+        chat_id = int(c.data.split(':')[1])
+        log = await user.leave_from_channel(chat_id) if user else False
+        if log:
+            await c.message.edit_text(f'Вы успешно покинули чат {chat_id}.')
+            chats = await user.get_chats() if user else []
+            keyboard = get_chats_keyboard(0)
+            await c.message.edit_reply_markup(reply_markup=keyboard)
+        else:
+            await c.answer('Не удалось покинуть чат')
             
+    elif 'EDIT_CHAT:' in c.data:
+        chat_id = int(c.data.split(':')[1])
+        keyboard = get_chat_settings_keyboard(chat_id)
+        await c.message.edit_text(f'Настройки чата {chat_id}:', reply_markup=keyboard)
+        
+    elif 'ADD_CHAT' == c.data:
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text='Изменить задержку', callback_data=f'CHANGE_TIMEOUT:{channel_id}')],
-                [InlineKeyboardButton(text='Изменить пост', callback_data=f'EDIT_CHANNEL_POST:{channel_id}')],
-                [InlineKeyboardButton(text='Доп. текст', callback_data=f'ADD_ADDITIONAL:{channel_id}')],
-                [InlineKeyboardButton(text='Удалить чат', callback_data=f'LFC:{channel_id}')]
+                [InlineKeyboardButton(text='Ввести ID вручную', callback_data='INPUT_CHAT_ID')],
+                [InlineKeyboardButton(text='Назад', callback_data='BACK_TO_CHATS')]
             ]
         )
+        await c.message.edit_text('Выберите способ добавления чата:', reply_markup=keyboard)
         
-        if addit_text_value:
-            await c.message.edit_text(f'Настройки чата {channel_id}:\nТекущий доп. текст: {addit_text_value}', reply_markup=keyboard)
-        else:
-            await c.message.edit_text(f'Настройки чата {channel_id}:', reply_markup=keyboard)
-            
-    elif 'ADD_ADDITIONAL:' in c.data:
-        channel_id = int(c.data.split(':')[1])
-        await state.set_data({'channel_id': channel_id})
-        await c.message.edit_text(f'Введите дополнительный текст для данного чата:')
-        await state.set_state(addition.id)
+    elif 'INPUT_CHAT_ID' == c.data:
+        await c.message.edit_text('Отправьте ID чата для добавления:')
+        await state.set_state(add_chat_state.id)
+        
+    elif 'BACK_TO_CHATS' == c.data:
+        chats = await user.get_chats() if user else []
+        keyboard = get_chats_keyboard(0)
+        await c.message.edit_reply_markup(reply_markup=keyboard)
         
     elif 'LFC:' in c.data:
-        channel_id = int(c.data.split(':')[1])
-        log = await user.leave_from_channel(channel_id) if user else False
+        chat_id = int(c.data.split(':')[1])
+        log = await user.leave_from_channel(chat_id) if user else False
         if log:
-            await c.message.edit_text(f'Вы успешно покинули данный чат.')
+            await c.message.edit_text(f'Вы успешно покинули чат {chat_id}.')
         else:
-            await c.message.edit_text('Возникли некие трудности при выходе.')
+            await c.answer('Не удалось покинуть чат')
+        await c.message.delete()
         
     elif 'CHANGE_TIMEOUT:' in c.data:
-        channel_id = int(c.data.split(':')[1])
-        await state.set_data({'channel_id': channel_id})
+        chat_id = int(c.data.split(':')[1])
         await c.message.edit_text('Отправь мне интервал рассылки для этого чата (в минутах):')
+        await state.set_data({'chat_id': chat_id})
         await state.set_state(channel_time.timeout)
         
     elif 'EDIT_CHANNEL_POST:' in c.data:
-        channel_id = int(c.data.split(':')[1])
-        await state.set_data({'channel_id': channel_id})
+        chat_id = int(c.data.split(':')[1])
+        await state.set_data({'chat_id': chat_id})
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text='Изменить текст', callback_data=f'CHANNEL_EDIT_TEXT:{channel_id}')],
-                [InlineKeyboardButton(text='Изменить фото', callback_data=f'CHANNEL_EDIT_PHOTO:{channel_id}')],
-                [InlineKeyboardButton(text='Изменить видео', callback_data=f'CHANNEL_EDIT_VIDEO:{channel_id}')],
-                [InlineKeyboardButton(text='Очистить пост', callback_data=f'CHANNEL_CLEAR:{channel_id}')]
+                [InlineKeyboardButton(text='Изменить текст', callback_data=f'CHANNEL_EDIT_TEXT:{chat_id}')],
+                [InlineKeyboardButton(text='Изменить фото', callback_data=f'CHANNEL_EDIT_PHOTO:{chat_id}')],
+                [InlineKeyboardButton(text='Изменить видео', callback_data=f'CHANNEL_EDIT_VIDEO:{chat_id}')],
+                [InlineKeyboardButton(text='Очистить пост', callback_data=f'CHANNEL_CLEAR:{chat_id}')]
             ]
         )
-        await c.message.edit_text(f'Редактирование канального поста для чата {channel_id}:', reply_markup=keyboard)
+        await c.message.edit_text(f'Редактирование канального поста для чата {chat_id}:', reply_markup=keyboard)
         
     elif 'CHANNEL_EDIT_TEXT:' in c.data:
-        channel_id = int(c.data.split(':')[1])
-        await state.set_data({'channel_id': channel_id})
+        chat_id = int(c.data.split(':')[1])
+        await state.set_data({'chat_id': chat_id})
         await c.message.edit_text('Введите текст канального поста (Markdown поддерживается):')
         await state.set_state(channel_post_text.text)
         
     elif 'CHANNEL_EDIT_PHOTO:' in c.data:
-        channel_id = int(c.data.split(':')[1])
-        await state.set_data({'channel_id': channel_id})
+        chat_id = int(c.data.split(':')[1])
+        await state.set_data({'chat_id': chat_id})
         await c.message.edit_text('Отправь фото для канального поста:')
         await state.set_state(channel_post_photo.photo)
         
     elif 'CHANNEL_EDIT_VIDEO:' in c.data:
-        channel_id = int(c.data.split(':')[1])
-        await state.set_data({'channel_id': channel_id})
+        chat_id = int(c.data.split(':')[1])
+        await state.set_data({'chat_id': chat_id})
         await c.message.edit_text('Отправь видео для канального поста:')
         await state.set_state(channel_post_video.video)
         
     elif 'CHANNEL_CLEAR:' in c.data:
-        channel_id = int(c.data.split(':')[1])
-        db.clear_channel_post(channel_id)
-        await c.message.edit_text(f'Канальный пост для чата {channel_id} был очищен.')
+        chat_id = int(c.data.split(':')[1])
+        db.clear_channel_post(chat_id)
+        await c.message.edit_text(f'Канальный пост для чата {chat_id} был очищен.')
+        
+    elif 'ADD_ADDITIONAL:' in c.data:
+        chat_id = int(c.data.split(':')[1])
+        await state.set_data({'chat_id': chat_id})
+        await c.message.edit_text(f'Введите дополнительный текст для данного чата:')
+        await state.set_state(addition.id)
         
     elif 'INTERVAL' == c.data:
         await c.message.edit_text('Отправь мне интервал рассылки по умолчанию (в минутах):')
@@ -402,31 +415,29 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
     elif 'update_cancel' == c.data:
         await c.message.edit_text('Обновление отменено')
         await state.clear()
-        
-    elif 'MANAGE_CHATS' == c.data:
-        await c.message.edit_text('Управление чатами:', reply_markup=channel_settings_keyboard())
-        
-    elif 'DEFAULT_SETTINGS' == c.data:
-        settings = db.settings()
-        keyboard = ReplyKeyboardMarkup(keyboard=[
-            [KeyboardButton(text='Изменить текст'), KeyboardButton(text='Изменить фото')],
-            [KeyboardButton(text='Изменить видео'), KeyboardButton(text='Изменить интервал')],
-            [KeyboardButton(text='Удалить медиа'), KeyboardButton(text='Вернуться')]
-        ], resize_keyboard=True)
-        await c.message.edit_text('Настройки по умолчанию:', reply_markup=keyboard)
-        
-    elif 'CHANNEL_POSTS' == c.data:
-        await c.message.edit_text('Управление канальными постами:', reply_markup=channel_post_keyboard())
+
+
+@router.message(add_chat_state.id)
+async def input_chat_id(m: Message, state: FSMContext):
+    try:
+        chat_id = int(m.text)
+        db.add_channel(chat_id)
+        await bot.send_message(m.chat.id, f'Чат {chat_id} успешно добавлен!')
+        await state.clear()
+    except Exception as e:
+        logger.error(f"Ошибка добавления чата: {e}")
+        await bot.send_message(m.chat.id, f'Ошибка: {e}')
+        await state.clear()
 
 
 @router.message(addition.id)
 async def input_additional_text(m: Message, state: FSMContext):
     data = await state.get_data()
-    channel_id = data.get('channel_id')
+    chat_id = data.get('chat_id')
     try:
-        if channel_id:
-            db.add_additional_text(channel_id, m.text)
-            await bot.send_message(m.chat.id, f'Дополнительный текст для чата {channel_id} обновлен!')
+        if chat_id:
+            db.add_additional_text(chat_id, m.text)
+            await bot.send_message(m.chat.id, f'Дополнительный текст для чата {chat_id} обновлен!')
         else:
             await bot.send_message(m.chat.id, 'Не найден ID чата для обновления!')
     except Exception as e:
@@ -438,10 +449,10 @@ async def input_additional_text(m: Message, state: FSMContext):
 @router.message(channel_post_text.text)
 async def input_channel_post_text(m: Message, state: FSMContext):
     data = await state.get_data()
-    channel_id = data.get('channel_id')
+    chat_id = data.get('chat_id')
     try:
-        if channel_id:
-            db.set_channel_post(channel_id, text=markdown_to_html(m.text))
+        if chat_id:
+            db.set_channel_post(chat_id, text=markdown_to_html(m.text))
             await bot.send_message(m.chat.id, f'Текст канального поста обновлен!')
         else:
             await bot.send_message(m.chat.id, 'Не найден ID чата для обновления!')
@@ -454,11 +465,11 @@ async def input_channel_post_text(m: Message, state: FSMContext):
 @router.message(channel_post_photo.photo)
 async def input_channel_post_photo(m: Message, state: FSMContext):
     data = await state.get_data()
-    channel_id = data.get('channel_id')
+    chat_id = data.get('chat_id')
     try:
-        if channel_id:
+        if chat_id:
             result = await m.photo[-1].download()
-            db.set_channel_post(channel_id, photo=os.path.basename(result.name))
+            db.set_channel_post(chat_id, photo=os.path.basename(result.name))
             await bot.send_message(m.chat.id, f'Фото канального поста обновлено!')
         else:
             await bot.send_message(m.chat.id, 'Не найден ID чата для обновления!')
@@ -471,18 +482,18 @@ async def input_channel_post_photo(m: Message, state: FSMContext):
 @router.message(channel_post_video.video)
 async def input_channel_post_video(m: Message, state: FSMContext):
     data = await state.get_data()
-    channel_id = data.get('channel_id')
+    chat_id = data.get('chat_id')
     try:
-        if channel_id:
+        if chat_id:
             result = await m.video.download()
-            db.set_channel_post(channel_id, video=os.path.basename(result.name))
+            db.set_channel_post(chat_id, video=os.path.basename(result.name))
             await bot.send_message(m.chat.id, f'Видео канального поста обновлено!')
         else:
             await bot.send_message(m.chat.id, 'Не найден ID чата для обновления!')
     except Exception as e:
         logger.error(f"Ошибка добавления канального видео: {e}")
         await bot.send_message(m.chat.id, 'Ошибка при обновлении видео.')
-    await state.clear()
+    await state_clear()
 
 
 @router.message(time.timeout)
@@ -505,13 +516,13 @@ async def input_timeout(m: Message, state: FSMContext):
 @router.message(channel_time.timeout)
 async def input_channel_timeout(m: Message, state: FSMContext):
     data = await state.get_data()
-    channel_id = data.get('channel_id')
+    chat_id = data.get('chat_id')
     try:
         timeout = int(m.text)
         if timeout > 1:
-            if channel_id:
-                db.set_channel_timeout(channel_id, timeout)
-                await bot.send_message(m.chat.id, f'Интервал для чата {channel_id} обновлен: {timeout} минут')
+            if chat_id:
+                db.set_channel_timeout(chat_id, timeout)
+                await bot.send_message(m.chat.id, f'Интервал для чата {chat_id} обновлен: {timeout} минут')
             else:
                 await bot.send_message(m.chat.id, 'Не найден ID чата для обновления!')
         else:
@@ -521,7 +532,7 @@ async def input_channel_timeout(m: Message, state: FSMContext):
     except Exception as e:
         logger.error(f"Ошибка установки таймаута канала: {e}")
         await bot.send_message(m.chat.id, 'Ошибка при обновлении таймаута.')
-    await state.clear()
+    await state_clear()
 
 
 @router.message(F.text)
