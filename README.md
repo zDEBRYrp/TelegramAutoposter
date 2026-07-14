@@ -1,4 +1,4 @@
-# TelegramAutoposter 4.1
+# TelegramAutoposter 1.0.1
 
 Telegram-бот для автоматической рассылки постов в супергруппы.
 
@@ -112,4 +112,4 @@ GNU GPL v3 - смотрите файл [LICENSE](LICENSE)
 
 ---
 
-TelegramAutoposter 4.1 - Automatic posting bot for Telegram channels.
+TelegramAutoposter 1.0.1 - Automatic posting bot for Telegram channels.
