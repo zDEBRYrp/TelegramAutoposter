@@ -1,4 +1,4 @@
-# TelegramAutoposter 1.0.1
+# TelegramAutoposter 1.1.0
 
 Telegram-бот для автоматической рассылки постов в супергруппы.
 
@@ -89,13 +89,6 @@ API_HASH=ваш_api_hash_здесь
 2. Отправить команду `/start`
 3. Использовать клавиатуру для управления
 
-## 🔒 Безопасность
-
-- `.env` файл игнорируется git (см. `.gitignore`)
-- Не публиковать токен и API credentials
-- Использовать отдельный API для продакшена
-- Держать `API_HASH` в секрете
-
 ## 📄 Лицензия
 
 GNU GPL v3 - смотрите файл [LICENSE](LICENSE)
@@ -112,4 +105,4 @@ GNU GPL v3 - смотрите файл [LICENSE](LICENSE)
 
 ---
 
-TelegramAutoposter 1.0.1 - Automatic posting bot for Telegram channels.
+TelegramAutoposter 1.1.0 - Automatic posting bot for Telegram channels.

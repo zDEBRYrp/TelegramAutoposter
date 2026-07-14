@@ -54,8 +54,45 @@ logger = logging.getLogger(__name__)
 def welcome_keyboard():
     keyboard = ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text='Запустить спам'), KeyboardButton(text='Пост')],
-        [KeyboardButton(text='Доступные чаты'), KeyboardButton(text='Интервал')],
-        [KeyboardButton(text='Информация'), KeyboardButton(text='Обновление')]
+        [KeyboardButton(text='Настройки чатов'), KeyboardButton(text='Информация')],
+        [KeyboardButton(text='Обновление')]
+    ], resize_keyboard=True)
+    return keyboard
+
+
+def post_settings_keyboard():
+    settings = db.settings()
+    keyboard = ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text='Изменить текст'), KeyboardButton(text='Изменить фото')],
+        [KeyboardButton(text='Изменить видео'), KeyboardButton(text='Удалить медиа')],
+        [KeyboardButton(text='Канальные посты'), KeyboardButton(text='Вернуться')]
+    ], resize_keyboard=True)
+    return keyboard
+
+
+def channel_settings_keyboard():
+    keyboard = ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text='Список чатов'), KeyboardButton(text='Добавить чат')],
+        [KeyboardButton(text='Удалить чат'), KeyboardButton(text='Вернуться')]
+    ], resize_keyboard=True)
+    return keyboard
+
+
+def chat_management_keyboard():
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text='Настройки чата', callback_data='MANAGE_CHATS')],
+            [InlineKeyboardButton(text='Настройки по умолчанию', callback_data='DEFAULT_SETTINGS')],
+            [InlineKeyboardButton(text='Канальные посты', callback_data='CHANNEL_POSTS')]
+        ]
+    )
+    return keyboard
+
+
+def channel_post_keyboard():
+    keyboard = ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text='Список канальных постов'), KeyboardButton(text='Добавить канальный пост')],
+        [KeyboardButton(text='Вернуться')]
     ], resize_keyboard=True)
     return keyboard
 
@@ -74,6 +111,35 @@ class login_password(StatesGroup):
 
 class update_state(StatesGroup):
     confirm = State()
+
+
+class addition(StatesGroup):
+    id = State()
+
+
+class post(StatesGroup):
+    text = State()
+
+
+class channel_post_text(StatesGroup):
+    text = State()
+
+
+class channel_post_photo(StatesGroup):
+    photo = State()
+
+
+class channel_post_video(StatesGroup):
+    video = State()
+
+
+class time(StatesGroup):
+    timeout = State()
+
+
+class channel_time(StatesGroup):
+    id = State()
+    timeout = State()
 
 
 @router.message(Command("start"))
@@ -121,244 +187,118 @@ async def send_info(message: Message):
     )
 
 
-@router.message(F.text == 'Обновление')
-async def update_menu(message: Message):
-    if not updater:
-        await message.answer("Модуль обновления недоступен")
+@router.message(F.text == 'Пост')
+async def post_settings(message: Message):
+    settings = db.settings()
+    text_html = markdown_to_html(settings[2]) if settings[2] else ''
+    try:
+        photo_path = f'{config.DIR}{settings[1]}' if config else settings[1]
+        video_path = f'{config.DIR}{settings[3]}' if config else settings[3]
+        if os.path.exists(photo_path):
+            await bot.send_photo(message.chat.id, photo_path, caption=text_html, parse_mode=ParseMode.HTML)
+        elif os.path.exists(video_path):
+            await bot.send_video(message.chat.id, video_path, caption=text_html, parse_mode=ParseMode.HTML)
+        else:
+            await bot.send_message(message.chat.id, text_html, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.error(f"Ошибка отправки медиа: {e}")
+        await bot.send_message(message.chat.id, text_html, parse_mode=ParseMode.HTML)
+    
+    await message.answer('Настройки поста:', reply_markup=post_settings_keyboard())
+
+
+@router.message(F.text == 'Запустить спам')
+async def start_spam_cmd(message: Message):
+    db.setSpam(1)
+    keyboard = ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text='Остановить спам')]
+    ], resize_keyboard=True)
+    await message.answer('Спам успешно запущен!', reply_markup=keyboard)
+    await start_spam_loop()
+
+
+@router.message(F.text == 'Остановить спам')
+async def stop_spam_cmd(message: Message):
+    db.setSpam(0)
+    await message.answer('Отправляю последние сообщения и закругляюсь', reply_markup=welcome_keyboard())
+
+
+@router.message(F.text == 'Интервал')
+async def interval_settings(message: Message):
+    settings = db.settings()
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text='Изменить интервал', callback_data='INTERVAL')]
+        ]
+    )
+    await message.answer(f'Текущий интервал: {settings[5]} минут(а)', reply_markup=keyboard, parse_mode=ParseMode.HTML)
+
+
+@router.message(F.text == 'Настройки чатов')
+async def chat_settings_menu(message: Message):
+    await message.answer('Управление чатами:', reply_markup=channel_settings_keyboard())
+
+
+@router.message(F.text == 'Список чатов')
+async def list_chats(message: Message):
+    chats = await user.get_chats() if user else []
+    if not chats:
+        await message.answer('Нет доступных чатов.')
         return
-    
-    check = updater.check_update()
-    
-    if check.get("error"):
-        await message.answer(f"Ошибка: {check['error']}")
-        return
-    
-    if check["update_available"]:
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text='Обновить', callback_data='update_confirm')],
-                [InlineKeyboardButton(text='Отмена', callback_data='update_cancel')]
-            ]
-        )
-        await message.answer(
-            f"Доступно обновление!\n"
-            f"Текущая: {check['current']}\n"
-            f"Последняя: {check['latest']}\n\n"
-            "Хотите обновить?",
-            reply_markup=keyboard
-        )
-    else:
-        await message.answer(f"Актуальная версия: {check['current']}")
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f'{_["title"]}', callback_data=f'CHAT_SETTINGS:{_["id"]}')]
+            for _ in chats
+        ]
+    )
+    await message.answer('Все доступные чаты:', reply_markup=keyboard)
 
 
-class addition(StatesGroup):
-    id = State()
+@router.message(F.text == 'Добавить чат')
+async def add_chat(message: Message):
+    await message.answer('Отправьте ID чата для добавления:')
 
 
-class post(StatesGroup):
-    text = State()
+@router.message(F.text == 'Удалить чат')
+async def remove_chat(message: Message):
+    await message.answer('Отправьте ID чата для удаления:')
 
 
-class channel_post_text(StatesGroup):
-    text = State()
+@router.message(F.text == 'Канальные посты')
+async def channel_posts_menu(message: Message):
+    await message.answer('Управление канальными постами:', reply_markup=channel_post_keyboard())
 
 
-class channel_post_photo(StatesGroup):
-    photo = State()
-
-
-class channel_post_video(StatesGroup):
-    video = State()
-
-
-class time(StatesGroup):
-    timeout = State()
-
-
-class channel_time(StatesGroup):
-    id = State()
-    timeout = State()
-
-
-@router.message(addition.id)
-async def input_report(m: Message, state: FSMContext):
-    data = await state.get_data()
-    channel_id = data.get('channel_id')
+@router.message(F.text == 'Список канальных постов')
+async def list_channel_posts(message: Message):
     try:
-        if channel_id:
-            db.add_additional_text(channel_id, m.text)
-            await bot.send_message(m.chat.id, f'Текст для данного чата был успешно обновлен!')
+        db.c.execute('SELECT CHANNEL, POST_PHOTO, POST_VIDEO, POST_TEXT FROM CHANNELS WHERE POST_PHOTO != "" OR POST_VIDEO != "" OR POST_TEXT != ""')
+        posts = db.c.fetchall()
+        if posts:
+            text = 'Канальные посты:\n'
+            for post in posts:
+                text += f'Чат {post[0]}: {"Photo" if post[1] else ""} {"Video" if post[2] else ""} {"Text" if post[3] else ""}\n'
+            await message.answer(text)
         else:
-            await bot.send_message(m.chat.id, f'Не найден ID чата для обновления!')
+            await message.answer('Канальных постов нет.')
     except Exception as e:
-        logger.error(f"Ошибка добавления текста: {e}")
-        await bot.send_message(m.chat.id, f'Текст для данного чата не был обновлен!')
-    await state.clear()
+        logger.error(f"Ошибка получения списка постов: {e}")
+        await message.answer(f'Ошибка: {e}')
 
 
-@router.message(post.text)
-async def input_post_text(m: Message, state: FSMContext):
-    db.change_text(markdown_to_html(m.text))
-    await bot.send_message(m.chat.id, f'Текст для поста был обновлен.')
-    await state.clear()
+@router.message(F.text == 'Добавить канальный пост')
+async def add_channel_post(message: Message):
+    await message.answer('Введите ID канала:')
 
 
-@router.message(channel_post_text.text)
-async def input_channel_post_text(m: Message, state: FSMContext):
-    data = await state.get_data()
-    channel_id = data.get('channel_id')
-    try:
-        if channel_id:
-            db.set_channel_post(channel_id, text=markdown_to_html(m.text))
-            await bot.send_message(m.chat.id, f'Текст для канального поста был обновлен!')
-        else:
-            await bot.send_message(m.chat.id, f'Не найден ID чата для обновления!')
-    except Exception as e:
-        logger.error(f"Ошибка добавления канального текста: {e}")
-        await bot.send_message(m.chat.id, f'Ошибка при обновлении текста.')
-    await state.clear()
-
-
-@router.message(channel_post_photo.photo)
-async def input_channel_post_photo(m: Message, state: FSMContext):
-    data = await state.get_data()
-    channel_id = data.get('channel_id')
-    try:
-        if channel_id:
-            result = await m.photo[-1].download()
-            db.set_channel_post(channel_id, photo=os.path.basename(result.name))
-            await bot.send_message(m.chat.id, f'Фото для канального поста было обновлено!')
-        else:
-            await bot.send_message(m.chat.id, f'Не найден ID чата для обновления!')
-    except Exception as e:
-        logger.error(f"Ошибка добавления канального фото: {e}")
-        await bot.send_message(m.chat.id, f'Ошибка при обновлении фото.')
-    await state.clear()
-
-
-@router.message(channel_post_video.video)
-async def input_channel_post_video(m: Message, state: FSMContext):
-    data = await state.get_data()
-    channel_id = data.get('channel_id')
-    try:
-        if channel_id:
-            result = await m.video.download()
-            db.set_channel_post(channel_id, video=os.path.basename(result.name))
-            await bot.send_message(m.chat.id, f'Видео для канального поста было обновлено!')
-        else:
-            await bot.send_message(m.chat.id, f'Не найден ID чата для обновления!')
-    except Exception as e:
-        logger.error(f"Ошибка добавления канального видео: {e}")
-        await bot.send_message(m.chat.id, f'Ошибка при обновлении видео.')
-    await state.clear()
-
-
-@router.message(time.timeout)
-async def input_timeout(m: Message, state: FSMContext):
-    try:
-        timeout = int(m.text)
-        if timeout > 1:
-            db.setTimeOut(timeout)
-            await bot.send_message(m.chat.id, f'Интервал рассылки был успешно обновлен.')
-        else:
-            await bot.send_message(m.chat.id, f'Введите число больше 1.')
-    except ValueError:
-        await bot.send_message(m.chat.id, f'Введите число.')
-    except Exception as e:
-        logger.error(f"Ошибка установки таймаута: {e}")
-        await bot.send_message(m.chat.id, f'Ошибка при обновлении таймаута.')
-    await state.clear()
-
-
-@router.message(channel_time.timeout)
-async def input_channel_timeout(m: Message, state: FSMContext):
-    data = await state.get_data()
-    channel_id = data.get('channel_id')
-    try:
-        timeout = int(m.text)
-        if timeout > 1:
-            if channel_id:
-                db.set_channel_timeout(channel_id, timeout)
-                await bot.send_message(m.chat.id, f'Интервал рассылки для этого чата был успешно обновлен.')
-            else:
-                await bot.send_message(m.chat.id, f'Не найден ID чата для обновления!')
-        else:
-            await bot.send_message(m.chat.id, f'Введите число больше 1.')
-    except ValueError:
-        await bot.send_message(m.chat.id, f'Введите число.')
-    except Exception as e:
-        logger.error(f"Ошибка установки таймаута канала: {e}")
-        await bot.send_message(m.chat.id, f'Ошибка при обновлении таймаута.')
-    await state.clear()
-
-
-@router.message(F.text)
-async def echo_message(m: Message):
-    if m.text == 'Доступные чаты':
-        chats = await user.get_chats() if user else []
-        if not chats:
-            await bot.send_message(m.chat.id, 'Нет доступных чатов.')
-            return
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text=f'{_["title"]}', callback_data=f'EDIT_ID:{_["id"]}')]
-                for _ in chats
-            ]
-        )
-        await bot.send_message(m.chat.id, 'Все доступные чаты:', reply_markup=keyboard)
-        
-    elif m.text == 'Запустить спам':
-        db.setSpam(1)
-        keyboard = ReplyKeyboardMarkup(keyboard=[
-            [KeyboardButton(text='Остановить спам')]
-        ], resize_keyboard=True)
-        await bot.send_message(m.chat.id, 'Спам успешно запущен!', reply_markup=keyboard)
-        await start_spam()
-        
-    elif m.text == 'Остановить спам':
-        db.setSpam(0)
-        await bot.send_message(m.chat.id, 'Отправляю последние сообщения и закругляюсь', reply_markup=welcome_keyboard())
-        
-    elif m.text == 'Интервал':
-        settings = db.settings()
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text='Изменить интервал', callback_data='INTERVAL')]
-            ]
-        )
-        await bot.send_message(m.chat.id, f'Текущий интервал: {settings[5]} минут(а)', reply_markup=keyboard, parse_mode=ParseMode.HTML)
-
-    elif m.text == 'Пост':
-        settings = db.settings()
-        text_html = markdown_to_html(settings[2]) if settings[2] else ''
-        try:
-            photo_path = f'{config.DIR}{settings[1]}' if config else settings[1]
-            video_path = f'{config.DIR}{settings[3]}' if config else settings[3]
-            if os.path.exists(photo_path):
-                await bot.send_photo(m.chat.id, photo_path, caption=text_html, parse_mode=ParseMode.HTML)
-            elif os.path.exists(video_path):
-                await bot.send_video(m.chat.id, video_path, caption=text_html, parse_mode=ParseMode.HTML)
-            else:
-                await bot.send_message(m.chat.id, text_html, parse_mode=ParseMode.HTML)
-        except Exception as e:
-            logger.error(f"Ошибка отправки медиа: {e}")
-            await bot.send_message(m.chat.id, text_html, parse_mode=ParseMode.HTML)
-
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text='Изменить глобальный текст', callback_data='EDIT_TEXT')],
-                [InlineKeyboardButton(text='Изменить глобальное фото', callback_data='EDIT_PHOTO')],
-                [InlineKeyboardButton(text='Изменить глобальное видео', callback_data='EDIT_VIDEO')],
-                [InlineKeyboardButton(text='Удалить медиа', callback_data='DEL_MEDIA')],
-                [InlineKeyboardButton(text='Управление канальными постами', callback_data='CHANNEL_POSTS')]
-            ]
-        )
-        await bot.send_message(m.chat.id, 'Ваш глобальный пост выглядит вот так', reply_markup=keyboard, parse_mode=ParseMode.HTML)
+@router.message(F.text == 'Вернуться')
+async def return_menu(message: Message):
+    await message.answer('Возвращаю в главное меню:', reply_markup=welcome_keyboard())
 
 
 @router.callback_query(F.data)
-async def poc_callback_but(c: CallbackQuery, state: FSMContext):
-    if 'EDIT_ID:' in c.data:
+async def callback_handler(c: CallbackQuery, state: FSMContext):
+    if 'CHAT_SETTINGS:' in c.data:
         channel_id = int(c.data.split(':')[1])
         try:
             addit_text = db.get_additional_text(channel_id)
@@ -371,75 +311,37 @@ async def poc_callback_but(c: CallbackQuery, state: FSMContext):
             
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text='Покинуть чат', callback_data=f'LFC:{channel_id}')],
-                [InlineKeyboardButton(text='Остановить спам', callback_data=f'STOP_SPAM:{channel_id}')],
-                [InlineKeyboardButton(text='Изменить задержку', callback_data=f'CHANGE_TIMEOUT:{channel_id}')]
+                [InlineKeyboardButton(text='Изменить задержку', callback_data=f'CHANGE_TIMEOUT:{channel_id}')],
+                [InlineKeyboardButton(text='Изменить пост', callback_data=f'EDIT_CHANNEL_POST:{channel_id}')],
+                [InlineKeyboardButton(text='Доп. текст', callback_data=f'ADD_ADDITIONAL:{channel_id}')],
+                [InlineKeyboardButton(text='Удалить чат', callback_data=f'LFC:{channel_id}')]
             ]
         )
         
-        if post_data and (post_data[0] or post_data[1] or post_data[2]):
-            keyboard.inline_keyboard.insert(0, [InlineKeyboardButton(text='Изменить канальный пост', callback_data=f'EDIT_CHANNEL_POST:{channel_id}')])
-        
         if addit_text_value:
-            keyboard.inline_keyboard.insert(0, [InlineKeyboardButton(text='Изменить дополнительный текст', callback_data=f'ADD_ADDITIONAL:{channel_id}')])
-            await bot.send_message(c.message.chat.id, f'Текущий дополнительный текст: {addit_text_value}', reply_markup=keyboard, parse_mode=ParseMode.HTML)
+            await c.message.edit_text(f'Настройки чата {channel_id}:\nТекущий доп. текст: {addit_text_value}', reply_markup=keyboard)
         else:
-            keyboard.inline_keyboard.insert(0, [InlineKeyboardButton(text='Добавить дополнительный текст', callback_data=f'ADD_ADDITIONAL:{channel_id}')])
-            await bot.send_message(c.message.chat.id, f'Дополнительного текста не найдено.', reply_markup=keyboard)
+            await c.message.edit_text(f'Настройки чата {channel_id}:', reply_markup=keyboard)
             
     elif 'ADD_ADDITIONAL:' in c.data:
         channel_id = int(c.data.split(':')[1])
         await state.set_data({'channel_id': channel_id})
-        await bot.send_message(c.message.chat.id, f'Введите дополнительный текст для данного чата:')
+        await c.message.edit_text(f'Введите дополнительный текст для данного чата:')
         await state.set_state(addition.id)
         
     elif 'LFC:' in c.data:
         channel_id = int(c.data.split(':')[1])
         log = await user.leave_from_channel(channel_id) if user else False
         if log:
-            text = f'Вы успешно покинули данный чат.'
+            await c.message.edit_text(f'Вы успешно покинули данный чат.')
         else:
-            text = 'Возникли некие трудности при выходе.'
-        await bot.send_message(c.message.chat.id, text)
-        
-    elif 'STOP_SPAM:' in c.data:
-        channel_id = int(c.data.split(':')[1])
-        db.stop_spam_for_channel(channel_id)
-        await bot.send_message(c.message.chat.id, f'Спам в данном чате был остановлен.')
+            await c.message.edit_text('Возникли некие трудности при выходе.')
         
     elif 'CHANGE_TIMEOUT:' in c.data:
         channel_id = int(c.data.split(':')[1])
         await state.set_data({'channel_id': channel_id})
-        await bot.send_message(c.message.chat.id, 'Отправь мне интервал рассылки для этого чата (в минутах):')
+        await c.message.edit_text('Отправь мне интервал рассылки для этого чата (в минутах):')
         await state.set_state(channel_time.timeout)
-        
-    elif 'EDIT_TEXT' == c.data:
-        await bot.send_message(c.message.chat.id, 'Введите текст глобального поста (Markdown поддерживается):')
-        await state.set_state(post.text)
-        
-    elif 'EDIT_PHOTO' == c.data:
-        await bot.send_message(c.message.chat.id, 'Отправь мне новое фото для глобального поста:')
-        
-    elif 'EDIT_VIDEO' == c.data:
-        await bot.send_message(c.message.chat.id, 'Отправь мне новое видео для глобального поста:')
-        
-    elif 'DEL_MEDIA' == c.data:
-        db.change_photo('')
-        db.change_video('')
-        await bot.send_message(c.message.chat.id, 'Медиа было успешно удалено.')
-        
-    elif 'CHANNEL_POSTS' == c.data:
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text='Список канальных постов', callback_data='LIST_CHANNEL_POSTS')],
-                [InlineKeyboardButton(text='Добавить канальный пост', callback_data='ADD_CHANNEL_POST')]
-            ]
-        )
-        await bot.send_message(c.message.chat.id, 'Управление канальными постами:', reply_markup=keyboard)
-        
-    elif 'ADD_CHANNEL_POST' == c.data:
-        await bot.send_message(c.message.chat.id, 'Введите ID канала:')
-        await state.set_state(channel_post_text.text)
         
     elif 'EDIT_CHANNEL_POST:' in c.data:
         channel_id = int(c.data.split(':')[1])
@@ -452,63 +354,177 @@ async def poc_callback_but(c: CallbackQuery, state: FSMContext):
                 [InlineKeyboardButton(text='Очистить пост', callback_data=f'CHANNEL_CLEAR:{channel_id}')]
             ]
         )
-        await bot.send_message(c.message.chat.id, f'Редактирование канального поста для чата {channel_id}:', reply_markup=keyboard)
+        await c.message.edit_text(f'Редактирование канального поста для чата {channel_id}:', reply_markup=keyboard)
         
     elif 'CHANNEL_EDIT_TEXT:' in c.data:
         channel_id = int(c.data.split(':')[1])
         await state.set_data({'channel_id': channel_id})
-        await bot.send_message(c.message.chat.id, 'Введите текст канального поста (Markdown поддерживается):')
+        await c.message.edit_text('Введите текст канального поста (Markdown поддерживается):')
         await state.set_state(channel_post_text.text)
         
     elif 'CHANNEL_EDIT_PHOTO:' in c.data:
         channel_id = int(c.data.split(':')[1])
         await state.set_data({'channel_id': channel_id})
-        await bot.send_message(c.message.chat.id, 'Отправь фото для канального поста:')
+        await c.message.edit_text('Отправь фото для канального поста:')
         await state.set_state(channel_post_photo.photo)
         
     elif 'CHANNEL_EDIT_VIDEO:' in c.data:
         channel_id = int(c.data.split(':')[1])
         await state.set_data({'channel_id': channel_id})
-        await bot.send_message(c.message.chat.id, 'Отправь видео для канального поста:')
+        await c.message.edit_text('Отправь видео для канального поста:')
         await state.set_state(channel_post_video.video)
         
     elif 'CHANNEL_CLEAR:' in c.data:
         channel_id = int(c.data.split(':')[1])
         db.clear_channel_post(channel_id)
-        await bot.send_message(c.message.chat.id, f'Канальный пост для чата {channel_id} был очищен.')
+        await c.message.edit_text(f'Канальный пост для чата {channel_id} был очищен.')
         
-    elif 'LIST_CHANNEL_POSTS' == c.data:
-        try:
-            db.c.execute('SELECT CHANNEL, POST_PHOTO, POST_VIDEO, POST_TEXT FROM CHANNELS WHERE POST_PHOTO != "" OR POST_VIDEO != "" OR POST_TEXT != ""')
-            posts = db.c.fetchall()
-            if posts:
-                text = 'Канальные посты:\n'
-                for post in posts:
-                    text += f'Чат {post[0]}: {"Photo" if post[1] else ""} {"Video" if post[2] else ""} {"Text" if post[3] else ""}\n'
-                await bot.send_message(c.message.chat.id, text)
-            else:
-                await bot.send_message(c.message.chat.id, 'Канальных постов нет.')
-        except Exception as e:
-            logger.error(f"Ошибка получения списка постов: {e}")
-            await bot.send_message(c.message.chat.id, f'Ошибка: {e}')
-            
+    elif 'INTERVAL' == c.data:
+        await c.message.edit_text('Отправь мне интервал рассылки по умолчанию (в минутах):')
+        await state.set_state(time.timeout)
+        
     elif 'update_confirm' == c.data:
         await state.set_state(update_state.confirm)
-        await bot.send_message(c.message.chat.id, 'Запускаю обновление...')
+        await c.message.edit_text('Запускаю обновление...')
         if updater:
             result = updater.run_update()
             if result.get("error"):
-                await bot.send_message(c.message.chat.id, f'Ошибка: {result["error"]}')
+                await c.message.edit_text(f'Ошибка: {result["error"]}')
             else:
-                await bot.send_message(c.message.chat.id, result["message"])
-                await bot.send_message(c.message.chat.id, 'Перезапустите скрипт для применения изменений.')
+                await c.message.edit_text(result["message"])
+                await c.message.edit_text('Перезапустите скрипт для применения изменений.')
         else:
-            await bot.send_message(c.message.chat.id, 'Модуль обновления недоступен')
+            await c.message.edit_text('Модуль обновления недоступен')
         await state.clear()
         
     elif 'update_cancel' == c.data:
-        await bot.send_message(c.message.chat.id, 'Обновление отменено')
+        await c.message.edit_text('Обновление отменено')
         await state.clear()
+        
+    elif 'MANAGE_CHATS' == c.data:
+        await c.message.edit_text('Управление чатами:', reply_markup=channel_settings_keyboard())
+        
+    elif 'DEFAULT_SETTINGS' == c.data:
+        settings = db.settings()
+        keyboard = ReplyKeyboardMarkup(keyboard=[
+            [KeyboardButton(text='Изменить текст'), KeyboardButton(text='Изменить фото')],
+            [KeyboardButton(text='Изменить видео'), KeyboardButton(text='Изменить интервал')],
+            [KeyboardButton(text='Удалить медиа'), KeyboardButton(text='Вернуться')]
+        ], resize_keyboard=True)
+        await c.message.edit_text('Настройки по умолчанию:', reply_markup=keyboard)
+        
+    elif 'CHANNEL_POSTS' == c.data:
+        await c.message.edit_text('Управление канальными постами:', reply_markup=channel_post_keyboard())
+
+
+@router.message(addition.id)
+async def input_additional_text(m: Message, state: FSMContext):
+    data = await state.get_data()
+    channel_id = data.get('channel_id')
+    try:
+        if channel_id:
+            db.add_additional_text(channel_id, m.text)
+            await bot.send_message(m.chat.id, f'Дополнительный текст для чата {channel_id} обновлен!')
+        else:
+            await bot.send_message(m.chat.id, 'Не найден ID чата для обновления!')
+    except Exception as e:
+        logger.error(f"Ошибка добавления текста: {e}")
+        await bot.send_message(m.chat.id, 'Ошибка при обновлении текста.')
+    await state.clear()
+
+
+@router.message(channel_post_text.text)
+async def input_channel_post_text(m: Message, state: FSMContext):
+    data = await state.get_data()
+    channel_id = data.get('channel_id')
+    try:
+        if channel_id:
+            db.set_channel_post(channel_id, text=markdown_to_html(m.text))
+            await bot.send_message(m.chat.id, f'Текст канального поста обновлен!')
+        else:
+            await bot.send_message(m.chat.id, 'Не найден ID чата для обновления!')
+    except Exception as e:
+        logger.error(f"Ошибка добавления канального текста: {e}")
+        await bot.send_message(m.chat.id, 'Ошибка при обновлении текста.')
+    await state.clear()
+
+
+@router.message(channel_post_photo.photo)
+async def input_channel_post_photo(m: Message, state: FSMContext):
+    data = await state.get_data()
+    channel_id = data.get('channel_id')
+    try:
+        if channel_id:
+            result = await m.photo[-1].download()
+            db.set_channel_post(channel_id, photo=os.path.basename(result.name))
+            await bot.send_message(m.chat.id, f'Фото канального поста обновлено!')
+        else:
+            await bot.send_message(m.chat.id, 'Не найден ID чата для обновления!')
+    except Exception as e:
+        logger.error(f"Ошибка добавления канального фото: {e}")
+        await bot.send_message(m.chat.id, 'Ошибка при обновлении фото.')
+    await state.clear()
+
+
+@router.message(channel_post_video.video)
+async def input_channel_post_video(m: Message, state: FSMContext):
+    data = await state.get_data()
+    channel_id = data.get('channel_id')
+    try:
+        if channel_id:
+            result = await m.video.download()
+            db.set_channel_post(channel_id, video=os.path.basename(result.name))
+            await bot.send_message(m.chat.id, f'Видео канального поста обновлено!')
+        else:
+            await bot.send_message(m.chat.id, 'Не найден ID чата для обновления!')
+    except Exception as e:
+        logger.error(f"Ошибка добавления канального видео: {e}")
+        await bot.send_message(m.chat.id, 'Ошибка при обновлении видео.')
+    await state.clear()
+
+
+@router.message(time.timeout)
+async def input_timeout(m: Message, state: FSMContext):
+    try:
+        timeout = int(m.text)
+        if timeout > 1:
+            db.setTimeOut(timeout)
+            await bot.send_message(m.chat.id, f'Интервал рассылки обновлен: {timeout} минут')
+        else:
+            await bot.send_message(m.chat.id, 'Введите число больше 1.')
+    except ValueError:
+        await bot.send_message(m.chat.id, 'Введите число.')
+    except Exception as e:
+        logger.error(f"Ошибка установки таймаута: {e}")
+        await bot.send_message(m.chat.id, 'Ошибка при обновлении таймаута.')
+    await state.clear()
+
+
+@router.message(channel_time.timeout)
+async def input_channel_timeout(m: Message, state: FSMContext):
+    data = await state.get_data()
+    channel_id = data.get('channel_id')
+    try:
+        timeout = int(m.text)
+        if timeout > 1:
+            if channel_id:
+                db.set_channel_timeout(channel_id, timeout)
+                await bot.send_message(m.chat.id, f'Интервал для чата {channel_id} обновлен: {timeout} минут')
+            else:
+                await bot.send_message(m.chat.id, 'Не найден ID чата для обновления!')
+        else:
+            await bot.send_message(m.chat.id, 'Введите число больше 1.')
+    except ValueError:
+        await bot.send_message(m.chat.id, 'Введите число.')
+    except Exception as e:
+        logger.error(f"Ошибка установки таймаута канала: {e}")
+        await bot.send_message(m.chat.id, 'Ошибка при обновлении таймаута.')
+    await state.clear()
+
+
+@router.message(F.text)
+async def echo_message(m: Message):
+    pass
 
 
 @router.message(F.photo)
@@ -712,7 +728,7 @@ async def update_menu(chat_id):
         await bot.send_message(chat_id, f"Актуальная версия: {check['current']}")
 
 
-async def start_spam():
+async def start_spam_loop():
     settings = db.settings()
     if settings[4] == 1:
         spam_list = []
