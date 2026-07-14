@@ -15,18 +15,37 @@ import asyncio
 import logging
 import os
 import re
-import config, user, updater
+
+try:
+    import config, user, updater
+except Exception as e:
+    logger = logging.getLogger(__name__)
+    logging.basicConfig(level=logging.INFO)
+    logger.error(f"Ошибка импорта модулей: {e}")
+    config = None
+    user = None
+    updater = None
+
 from sqliter import DBConnection, markdown_to_html
 
 router = Router()
 
 from aiogram.client.default import DefaultBotProperties
-bot = Bot(token=config.TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+
+def get_version():
+    try:
+        with open("version.txt", "r") as f:
+            return f.read().strip()
+    except:
+        return "unknown"
+
+bot = Bot(token=config.TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML)) if config else None
 dp = Dispatcher(storage=MemoryStorage())
 dp.include_router(router)
 db = DBConnection()
 
-user.init_bot(bot)
+if user:
+    user.init_bot(bot)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -59,11 +78,12 @@ class update_state(StatesGroup):
 
 @router.message(Command("start"))
 async def process_start_command(m: Message):
-    if m.chat.id in config.ADMINS:
+    if config and m.chat.id in config.ADMINS:
+        version = get_version()
         await bot.send_message(
             m.chat.id,
-            "<b>Добро пожаловать!</b>\n\n"
-            "Версия скрипта: 4.1.0 build\n\n"
+            f"<b>Добро пожаловать!</b>\n\n"
+            f"Версия скрипта: {version}\n\n"
             "Воспользуйтесь клавиатурой ниже для управления",
             reply_markup=welcome_keyboard()
         )
@@ -73,28 +93,28 @@ async def process_start_command(m: Message):
 
 @router.message(Command("login"))
 async def login_command(m: Message):
-    if m.chat.id in config.ADMINS:
+    if config and m.chat.id in config.ADMINS:
         await do_login(m.chat.id)
 
 
 @router.message(Command("update"))
 async def update_command(m: Message):
-    if m.chat.id in config.ADMINS:
+    if config and m.chat.id in config.ADMINS:
         await update_menu(m.chat.id)
 
 
 @router.message(F.text == 'Информация')
 async def send_info(message: Message):
-    current = updater.get_current_version()
-    latest = updater.get_latest_version()
+    version = get_version()
+    latest = updater.get_latest_version() if updater else None
     
-    if latest and current != latest:
+    if latest and version != latest:
         status = f"Доступна версия {latest}"
     else:
         status = "Актуально"
     
     await message.answer(
-        f"Version: 4.1.0 build\n"
+        f"Version: {version}\n"
         f"Status: {status}\n\n"
         f"Support: @support",
         parse_mode=ParseMode.HTML
@@ -103,6 +123,10 @@ async def send_info(message: Message):
 
 @router.message(F.text == 'Обновление')
 async def update_menu(message: Message):
+    if not updater:
+        await message.answer("Модуль обновления недоступен")
+        return
+    
     check = updater.check_update()
     
     if check.get("error"):
@@ -271,7 +295,7 @@ async def input_channel_timeout(m: Message, state: FSMContext):
 @router.message(F.text)
 async def echo_message(m: Message):
     if m.text == 'Доступные чаты':
-        chats = await user.get_chats()
+        chats = await user.get_chats() if user else []
         if not chats:
             await bot.send_message(m.chat.id, 'Нет доступных чатов.')
             return
@@ -308,8 +332,8 @@ async def echo_message(m: Message):
         settings = db.settings()
         text_html = markdown_to_html(settings[2]) if settings[2] else ''
         try:
-            photo_path = f'{config.DIR}{settings[1]}' if config.DIR else settings[1]
-            video_path = f'{config.DIR}{settings[3]}' if config.DIR else settings[3]
+            photo_path = f'{config.DIR}{settings[1]}' if config else settings[1]
+            video_path = f'{config.DIR}{settings[3]}' if config else settings[3]
             if os.path.exists(photo_path):
                 await bot.send_photo(m.chat.id, photo_path, caption=text_html, parse_mode=ParseMode.HTML)
             elif os.path.exists(video_path):
@@ -371,7 +395,7 @@ async def poc_callback_but(c: CallbackQuery, state: FSMContext):
         
     elif 'LFC:' in c.data:
         channel_id = int(c.data.split(':')[1])
-        log = await user.leave_from_channel(channel_id)
+        log = await user.leave_from_channel(channel_id) if user else False
         if log:
             text = f'Вы успешно покинули данный чат.'
         else:
@@ -471,12 +495,15 @@ async def poc_callback_but(c: CallbackQuery, state: FSMContext):
     elif 'update_confirm' == c.data:
         await state.set_state(update_state.confirm)
         await bot.send_message(c.message.chat.id, 'Запускаю обновление...')
-        result = updater.run_update()
-        if result.get("error"):
-            await bot.send_message(c.message.chat.id, f'Ошибка: {result["error"]}')
+        if updater:
+            result = updater.run_update()
+            if result.get("error"):
+                await bot.send_message(c.message.chat.id, f'Ошибка: {result["error"]}')
+            else:
+                await bot.send_message(c.message.chat.id, result["message"])
+                await bot.send_message(c.message.chat.id, 'Перезапустите скрипт для применения изменений.')
         else:
-            await bot.send_message(c.message.chat.id, result["message"])
-            await bot.send_message(c.message.chat.id, 'Перезапустите скрипт для применения изменений.')
+            await bot.send_message(c.message.chat.id, 'Модуль обновления недоступен')
         await state.clear()
         
     elif 'update_cancel' == c.data:
@@ -547,13 +574,13 @@ async def handle_phone_input(m: Message, state: FSMContext):
 async def handle_code_input(m: Message, state: FSMContext):
     code = m.text.strip()
     if code.isdigit() and 4 <= len(code) <= 6:
-        if user.login_phone:
+        if user and user.login_phone:
             from pyrogram import Client
-            client = Client("session", config.API_ID, config.API_HASH, workdir=".")
+            client = Client("session", config.API_ID, config.API_HASH, workdir=".") if config else Client("session", 0, "", workdir=".")
             try:
                 async with client:
                     await client.sign_in(user.login_phone, code)
-                await bot.send_message(config.ADMINS[0], "Успешный вход!")
+                await bot.send_message(config.ADMINS[0], "Успешный вход!") if config else None
                 user.current_code[m.chat.id] = ""
                 await state.clear()
             except Exception as e:
@@ -599,11 +626,11 @@ async def handle_code_button(c: CallbackQuery, state: FSMContext):
     elif code_part == 'enter':
         if current_code_val and user.login_phone:
             from pyrogram import Client
-            client = Client("session", config.API_ID, config.API_HASH, workdir=".")
+            client = Client("session", config.API_ID, config.API_HASH, workdir=".") if config else Client("session", 0, "", workdir=".")
             try:
                 async with client:
                     await client.sign_in(user.login_phone, current_code_val)
-                await bot.send_message(config.ADMINS[0], "Успешный вход!")
+                await bot.send_message(config.ADMINS[0], "Успешный вход!") if config else None
                 user.current_code[c.message.chat.id] = ""
                 await state.clear()
             except Exception as e:
@@ -621,13 +648,13 @@ async def handle_code_button(c: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == 'password_enter')
 async def handle_password_confirm(c: CallbackQuery):
-    if user.login_password and user.login_phone:
+    if user and user.login_password and user.login_phone:
         from pyrogram import Client
-        client = Client("session", config.API_ID, config.API_HASH, workdir=".")
+        client = Client("session", config.API_ID, config.API_HASH, workdir=".") if config else Client("session", 0, "", workdir=".")
         try:
             async with client:
                 await client.check_password(user.login_password)
-            await bot.send_message(config.ADMINS[0], "Успешный вход!")
+            await bot.send_message(config.ADMINS[0], "Успешный вход!") if config else None
             user.current_code[c.message.chat.id] = ""
             await c.message.delete()
         except Exception as e:
@@ -656,6 +683,10 @@ async def do_login(chat_id):
 
 
 async def update_menu(chat_id):
+    if not updater:
+        await bot.send_message(chat_id, "Модуль обновления недоступен")
+        return
+    
     check = updater.check_update()
     
     if check.get("error"):
@@ -698,7 +729,7 @@ async def start_spam():
             spam_list.append(i)
         
         if not spam_list:
-            await bot.send_message(config.ADMINS[0], 'Нет доступных каналов для рассылки')
+            await bot.send_message(config.ADMINS[0], 'Нет доступных каналов для рассылки') if config else None
             return
         
         settings = db.settings()
