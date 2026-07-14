@@ -195,14 +195,16 @@ async def post_settings(message: Message):
         photo_path = f'{config.DIR}{settings[1]}' if config else settings[1]
         video_path = f'{config.DIR}{settings[3]}' if config else settings[3]
         if os.path.exists(photo_path):
-            await bot.send_photo(message.chat.id, photo_path, caption=text_html, parse_mode=ParseMode.HTML)
+            await bot.send_photo(message.chat.id, photo_path, caption=text_html or ' ', parse_mode=ParseMode.HTML)
         elif os.path.exists(video_path):
-            await bot.send_video(message.chat.id, video_path, caption=text_html, parse_mode=ParseMode.HTML)
-        else:
+            await bot.send_video(message.chat.id, video_path, caption=text_html or ' ', parse_mode=ParseMode.HTML)
+        elif text_html:
             await bot.send_message(message.chat.id, text_html, parse_mode=ParseMode.HTML)
+        else:
+            await bot.send_message(message.chat.id, 'Нет поста', parse_mode=ParseMode.HTML)
     except Exception as e:
         logger.error(f"Ошибка отправки медиа: {e}")
-        await bot.send_message(message.chat.id, text_html, parse_mode=ParseMode.HTML)
+        await bot.send_message(message.chat.id, 'Ошибка отправки поста')
     
     await message.answer('Настройки поста:', reply_markup=post_settings_keyboard())
 

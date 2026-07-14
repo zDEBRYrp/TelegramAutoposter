@@ -10,13 +10,7 @@ from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
-client = Client(
-    "session",
-    api_id=config.API_ID,
-    api_hash=config.API_HASH,
-    workdir=".",
-    parse_mode=enums.ParseMode.DEFAULT
-)
+pyrogram_clients = {}
 
 ALLOWED_USERS = [5219407827, 5717555949, 6974533139, 6212219963, 6930339598]
 if hasattr(config, 'ALLOWED_USERS'):
@@ -31,12 +25,26 @@ current_code = {}
 code_messages = {}
 
 
+def get_pyrogram_client():
+    global pyrogram_clients
+    if 'main' not in pyrogram_clients:
+        pyrogram_clients['main'] = Client(
+            "session",
+            api_id=config.API_ID,
+            api_hash=config.API_HASH,
+            workdir=".",
+            parse_mode=enums.ParseMode.DEFAULT
+        )
+    return pyrogram_clients['main']
+
+
 def init_bot(bot):
     global bot_instance
     bot_instance = bot
 
 
 async def check_connection():
+    client = get_pyrogram_client()
     try:
         async with client:
             me = await client.get_me()
@@ -64,6 +72,7 @@ async def get_chats() -> List[Dict[str, Any]]:
         return chat_list
     
     try:
+        client = get_pyrogram_client()
         async with client:
             async for dialog in client.get_dialogs():
                 if dialog.chat.type == enums.ChatType.SUPERGROUP:
@@ -81,6 +90,7 @@ async def leave_from_channel(channel_id: int) -> bool:
         return False
         
     try:
+        client = get_pyrogram_client()
         async with client:
             await client.leave_chat(channel_id)
         return True
@@ -125,16 +135,22 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                             photo_path = f'{config.DIR}{post_photo}' if config.DIR else post_photo
                             for ext in ['.jpg', '.jpeg', '.png', '.webp', '']:
                                 if os.path.exists(photo_path + ext):
-                                    await client.send_photo(chat['id'], photo_path + ext, caption=post_text)
+                                    client = get_pyrogram_client()
+                                    async with client:
+                                        await client.send_photo(chat['id'], photo_path + ext, caption=post_text)
                                     break
                         elif post_video:
                             video_path = f'{config.DIR}{post_video}' if config.DIR else post_video
                             for ext in ['.mp4', '.mov', '.webm', '']:
                                 if os.path.exists(video_path + ext):
-                                    await client.send_video(chat['id'], video_path + ext, caption=post_text)
+                                    client = get_pyrogram_client()
+                                    async with client:
+                                        await client.send_video(chat['id'], video_path + ext, caption=post_text)
                                     break
                         else:
-                            await client.send_message(chat['id'], post_text)
+                            client = get_pyrogram_client()
+                            async with client:
+                                await client.send_message(chat['id'], post_text)
                     else:
                         message_text = f"{settings[2]}\n\n{chat.get('text', '')}"
                         
@@ -143,16 +159,22 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                             photo_path = f'{config.DIR}{settings[1]}' if config.DIR else settings[1]
                             for ext in ['.jpg', '.jpeg', '.png', '.webp', '']:
                                 if os.path.exists(photo_path + ext):
-                                    await client.send_photo(chat['id'], photo_path + ext, caption=message_text)
+                                    client = get_pyrogram_client()
+                                    async with client:
+                                        await client.send_photo(chat['id'], photo_path + ext, caption=message_text)
                                     photo_found = True
                                     break
                         
                         if not photo_found:
                             if settings[3] and settings[3] != '':
-                                await client.send_message(chat['id'], message_text)
+                                client = get_pyrogram_client()
+                                async with client:
+                                    await client.send_message(chat['id'], message_text)
                             elif not photo_found:
                                 logger.error(f"Файл не найден: {settings[1]}")
-                                await client.send_message(chat['id'], f'{message_text}\n\n⚠️ Приложение не найдено')
+                                client = get_pyrogram_client()
+                                async with client:
+                                    await client.send_message(chat['id'], f'{message_text}\n\n⚠️ Приложение не найдено')
                     
                     await asyncio.sleep(settings[5] * 60)
                     
