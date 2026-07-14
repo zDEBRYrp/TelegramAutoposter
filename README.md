@@ -122,11 +122,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 - ❌ Нельзя продавать или использовать в коммерческих целях
 - ✅ Исходный код должен быть открыт
 
-## 🙏 Благодарности
-
-- [Pyrogram](https://github.com/pyrogram/pyrogram)
-- [Aiogram](https://github.com/aiogram/aiogram)
-
 ---
 
 TelegramAutoposter 4.0 - Automatic posting bot for Telegram channels.
