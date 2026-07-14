@@ -15,7 +15,7 @@ import asyncio
 import logging
 import os
 import re
-import config, user
+import config, user, updater
 from sqliter import DBConnection, markdown_to_html
 
 router = Router()
@@ -36,7 +36,7 @@ def welcome_keyboard():
     keyboard = ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text='Запустить спам'), KeyboardButton(text='Пост')],
         [KeyboardButton(text='Доступные чаты'), KeyboardButton(text='Интервал')],
-        [KeyboardButton(text='Информация')]
+        [KeyboardButton(text='Информация'), KeyboardButton(text='Обновление')]
     ], resize_keyboard=True)
     return keyboard
 
@@ -53,13 +53,17 @@ class login_password(StatesGroup):
     password = State()
 
 
+class update_state(StatesGroup):
+    confirm = State()
+
+
 @router.message(Command("start"))
 async def process_start_command(m: Message):
     if m.chat.id in config.ADMINS:
         await bot.send_message(
             m.chat.id,
             "<b>Добро пожаловать!</b>\n\n"
-            "Версия скрипта: 4.0.0 build\n\n"
+            "Версия скрипта: 4.1.0 build\n\n"
             "Воспользуйтесь клавиатурой ниже для управления",
             reply_markup=welcome_keyboard()
         )
@@ -73,14 +77,54 @@ async def login_command(m: Message):
         await do_login(m.chat.id)
 
 
+@router.message(Command("update"))
+async def update_command(m: Message):
+    if m.chat.id in config.ADMINS:
+        await update_menu(m.chat.id)
+
+
 @router.message(F.text == 'Информация')
 async def send_info(message: Message):
+    current = updater.get_current_version()
+    latest = updater.get_latest_version()
+    
+    if latest and current != latest:
+        status = f"Доступна версия {latest}"
+    else:
+        status = "Актуально"
+    
     await message.answer(
-        "Version: 4.0.0 build\n"
-        "Update: 2026\n\n"
-        "Support: @support",
+        f"Version: 4.1.0 build\n"
+        f"Status: {status}\n\n"
+        f"Support: @support",
         parse_mode=ParseMode.HTML
     )
+
+
+@router.message(F.text == 'Обновление')
+async def update_menu(message: Message):
+    check = updater.check_update()
+    
+    if check.get("error"):
+        await message.answer(f"Ошибка: {check['error']}")
+        return
+    
+    if check["update_available"]:
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text='Обновить', callback_data='update_confirm')],
+                [InlineKeyboardButton(text='Отмена', callback_data='update_cancel')]
+            ]
+        )
+        await message.answer(
+            f"Доступно обновление!\n"
+            f"Текущая: {check['current']}\n"
+            f"Последняя: {check['latest']}\n\n"
+            "Хотите обновить?",
+            reply_markup=keyboard
+        )
+    else:
+        await message.answer(f"Актуальная версия: {check['current']}")
 
 
 class addition(StatesGroup):
@@ -213,7 +257,7 @@ async def input_channel_timeout(m: Message, state: FSMContext):
                 db.set_channel_timeout(channel_id, timeout)
                 await bot.send_message(m.chat.id, f'Интервал рассылки для этого чата был успешно обновлен.')
             else:
-                await bot.send_message(m.chat.id, f'Не найден ID ча��а для обновления!')
+                await bot.send_message(m.chat.id, f'Не найден ID чата для обновления!')
         else:
             await bot.send_message(m.chat.id, f'Введите число больше 1.')
     except ValueError:
@@ -423,6 +467,21 @@ async def poc_callback_but(c: CallbackQuery, state: FSMContext):
         except Exception as e:
             logger.error(f"Ошибка получения списка постов: {e}")
             await bot.send_message(c.message.chat.id, f'Ошибка: {e}')
+            
+    elif 'update_confirm' == c.data:
+        await state.set_state(update_state.confirm)
+        await bot.send_message(c.message.chat.id, 'Запускаю обновление...')
+        result = updater.run_update()
+        if result.get("error"):
+            await bot.send_message(c.message.chat.id, f'Ошибка: {result["error"]}')
+        else:
+            await bot.send_message(c.message.chat.id, result["message"])
+            await bot.send_message(c.message.chat.id, 'Перезапустите скрипт для применения изменений.')
+        await state.clear()
+        
+    elif 'update_cancel' == c.data:
+        await bot.send_message(c.message.chat.id, 'Обновление отменено')
+        await state.clear()
 
 
 @router.message(F.photo)
@@ -583,12 +642,6 @@ async def handle_password_cancel(c: CallbackQuery):
     await c.answer("Вход отменен")
 
 
-@router.callback_query(F.data == 'login_cancel')
-async def cancel_login(c: CallbackQuery):
-    await c.message.delete()
-    await c.answer("Вход отменен")
-
-
 async def do_login(chat_id):
     if os.path.exists("session.session"):
         os.remove("session.session")
@@ -600,6 +653,32 @@ async def do_login(chat_id):
         await msg.delete()
     except:
         pass
+
+
+async def update_menu(chat_id):
+    check = updater.check_update()
+    
+    if check.get("error"):
+        await bot.send_message(chat_id, f"Ошибка: {check['error']}")
+        return
+    
+    if check["update_available"]:
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text='Обновить', callback_data='update_confirm')],
+                [InlineKeyboardButton(text='Отмена', callback_data='update_cancel')]
+            ]
+        )
+        await bot.send_message(
+            chat_id,
+            f"Доступно обновление!\n"
+            f"Текущая: {check['current']}\n"
+            f"Последняя: {check['latest']}\n\n"
+            "Хотите обновить?",
+            reply_markup=keyboard
+        )
+    else:
+        await bot.send_message(chat_id, f"Актуальная версия: {check['current']}")
 
 
 async def start_spam():
