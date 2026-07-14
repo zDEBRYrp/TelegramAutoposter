@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.env
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data
+database.db
+session.session
+
+# Photos
+photos/*.jpg
+photos/*.jpeg
+photos/*.png
+photos/*.webp
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp

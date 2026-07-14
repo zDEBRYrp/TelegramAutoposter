@@ -1,0 +1,11 @@
+# Основные зависимости
+aiogram>=3.16.0
+pyrogram>=2.0.0
+tgcrypto>=1.2.5
+markdown2>=2.4.0
+
+# Утилиты
+python-dotenv>=1.0.0
+
+# Тестирование
+pytest>=7.4.0
