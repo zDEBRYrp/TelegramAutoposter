@@ -25,7 +25,6 @@ ALLOWED_USERS = list(set(ALLOWED_USERS))
 
 bot_instance = None
 
-# Переменные для FSM входа
 login_phone = None
 login_password = None
 current_code = {}
@@ -38,7 +37,6 @@ def init_bot(bot):
 
 
 async def check_connection():
-    """Проверить и восстановить подключение"""
     try:
         async with client:
             me = await client.get_me()
@@ -50,8 +48,8 @@ async def check_connection():
         if bot_instance:
             await bot_instance.send_message(
                 config.ADMINS[0], 
-                "⚠️ Сессия недействительна.\n"
-                "Удалите файл `session.session` и запустите бота снова.\n"
+                "Сессия недействительна.\n"
+                "Удалите файл session.session и запустите бота снова.\n"
                 "Бот попросит ввести телефон и код."
             )
         return False
@@ -61,7 +59,6 @@ async def check_connection():
 
 
 async def get_chats() -> List[Dict[str, Any]]:
-    """Получить список супергрупп"""
     chat_list = []
     if not await check_connection():
         return chat_list
@@ -80,7 +77,6 @@ async def get_chats() -> List[Dict[str, Any]]:
 
 
 async def leave_from_channel(channel_id: int) -> bool:
-    """Покинуть канал/чат"""
     if not await check_connection():
         return False
         
@@ -96,7 +92,6 @@ async def leave_from_channel(channel_id: int) -> bool:
 
 
 async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None:
-    """Основной цикл рассылки"""
     if not await check_connection():
         return
         
@@ -159,7 +154,6 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                                 logger.error(f"Файл не найден: {settings[1]}")
                                 await client.send_message(chat['id'], f'{message_text}\n\n⚠️ Приложение не найдено')
                     
-                    # Задержка
                     await asyncio.sleep(settings[5] * 60)
                     
                 except FloodWait as e:
@@ -173,9 +167,7 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
         logger.error(f"Ошибка в spamming: {e}")
 
 
-# Добавлено для запуска из main.py
 async def run_spam():
-    """Запустить рассылку"""
     from sqliter import DBConnection
     db = DBConnection()
     settings = db.settings()
@@ -194,7 +186,7 @@ async def run_spam():
         spam_list.append(i)
     
     if not spam_list:
-        await bot_instance.send_message(config.ADMINS[0], '⚠️ Нет доступных каналов для рассылки')
+        await bot_instance.send_message(config.ADMINS[0], 'Нет доступных каналов для рассылки')
         return
     
     asyncio.create_task(spamming(spam_list, settings, db))

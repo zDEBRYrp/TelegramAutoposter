@@ -6,7 +6,6 @@ from typing import Optional, Tuple, Any
 
 logger = logging.getLogger(__name__)
 
-# Импорт markdown2
 try:
     import markdown2
     HAS_MARKDOWN = True
@@ -15,25 +14,16 @@ except ImportError:
 
 
 def markdown_to_html(text: str) -> str:
-    """Конвертация Markdown в текст с форматированием для Telegram"""
     if not HAS_MARKDOWN or not text:
         return text
     try:
         html = markdown2.markdown(text, extras=['tables', 'fenced-code-blocks'])
-        # Убираем все HTML теги для Telegram
-        # Telegram поддерживает только: *bold*, _italic_, ~strikethrough~, `code`, ```pre```, [links](url), @mentions
-        # Конвертируем основные теги в Markdown
         text = html
-        
-        # Убираем все остальные теги
         import re
         text = re.sub(r'<[^>]+>', '', text)
-        
-        # Конвертируем основные теги в Markdown
-        text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)  # bold
+        text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
         text = re.sub(r'<strong>(.+?)</strong>', r'*\1*', text)
-        text = re.sub(r'_([^_]+)_', r'_\1_', text)  # italic
-        
+        text = re.sub(r'_([^_]+)_', r'_\1_', text)
         return text.strip()
     except Exception:
         return text
@@ -47,9 +37,7 @@ class DBConnection(object):
         self.init_db()
     
     def init_db(self):
-        """Инициализация таблиц БД"""
         try:
-            # Таблица настроек
             self.c.execute('''
                 CREATE TABLE IF NOT EXISTS SETTINGS (
                     ID INTEGER PRIMARY KEY,
@@ -61,7 +49,6 @@ class DBConnection(object):
                 )
             ''')
             
-            # Таблица каналов
             self.c.execute('''
                 CREATE TABLE IF NOT EXISTS CHANNELS (
                     CHANNEL INTEGER PRIMARY KEY,
@@ -74,7 +61,6 @@ class DBConnection(object):
                 )
             ''')
             
-            # Вставка базовой настройки если нет
             self.c.execute('SELECT * FROM SETTINGS WHERE ID = 1')
             if self.c.fetchone() is None:
                 self.c.execute('INSERT INTO SETTINGS (ID, PHOTO, VIDEO, TEXT, SPAM, TIMEOUT) VALUES (?, ?, ?, ?, ?, ?)',
@@ -129,7 +115,6 @@ class DBConnection(object):
     
     def change_photo(self, name: str) -> bool:
         try:
-            # Убираем расширение для совместимости
             base_name = os.path.splitext(name)[0] if name else ''
             self.c.execute('UPDATE SETTINGS SET PHOTO = ? WHERE ID = ?', [base_name, 1])
             self.conn.commit()
@@ -202,9 +187,7 @@ class DBConnection(object):
             logger.error(f"Ошибка добавления канала: {e}")
             return False
     
-    # Методы для канальных постов
     def set_channel_post(self, channel_id: int, photo: str = '', video: str = '', text: str = '') -> bool:
-        """Установка поста для конкретного канала"""
         try:
             photo_base = os.path.splitext(photo)[0] if photo else ''
             video_base = os.path.splitext(video)[0] if video else ''
@@ -223,7 +206,6 @@ class DBConnection(object):
             return False
     
     def get_channel_post(self, channel_id: int) -> Optional[Tuple[str, str, str]]:
-        """Получение поста для конкретного канала"""
         try:
             self.c.execute('SELECT POST_PHOTO, POST_VIDEO, POST_TEXT FROM CHANNELS WHERE CHANNEL = ?', [str(channel_id)])
             return self.c.fetchone()
@@ -232,7 +214,6 @@ class DBConnection(object):
             return None
     
     def clear_channel_post(self, channel_id: int) -> bool:
-        """Очистка поста для канала"""
         try:
             self.c.execute('UPDATE CHANNELS SET POST_PHOTO = ?, POST_VIDEO = ?, POST_TEXT = ? WHERE CHANNEL = ?',
                           ['', '', '', str(channel_id)])
