@@ -158,9 +158,10 @@ async def process_start_command(m: Message):
         await bot.send_message(m.chat.id, "Нет доступа")
 
 @router.message(Command("login"))
-async def login_command(m: Message):
+async def login_command(m: Message, state: FSMContext):
     if config and m.chat.id in config.ADMINS:
         await do_login(m.chat.id)
+        await state.set_state(login_phone.phone)
 
 @router.message(Command("update"))
 async def update_command(m: Message):
@@ -541,6 +542,14 @@ async def handle_phone_input(m: Message, state: FSMContext):
             await m.delete()
         except:
             pass
+
+        await m.answer('Отправляю код...')
+        result = await user.do_login(phone)
+        if result is None:
+            await m.answer('Ошибка отправки кода. Проверьте номер телефона.')
+            await state.clear()
+            return
+
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text='1', callback_data='code_1'),
              InlineKeyboardButton(text='2', callback_data='code_2'),
@@ -555,8 +564,7 @@ async def handle_phone_input(m: Message, state: FSMContext):
              InlineKeyboardButton(text='0', callback_data='code_0'),
              InlineKeyboardButton(text='Войти', callback_data='code_enter')]
         ])
-        await m.answer(f'Телефон сохранен.')
-        msg = await m.answer('Код: ', reply_markup=keyboard)
+        msg = await m.answer('Введите код из Telegram:\nКод: ', reply_markup=keyboard)
         user.code_messages[m.chat.id] = msg.message_id
         await state.set_state(login_code.code)
     else:
@@ -577,17 +585,22 @@ async def handle_code_button(c: CallbackQuery, state: FSMContext):
             await c.answer("Код пустой")
     elif code_part == 'enter':
         if current_code_val and user.login_phone:
-            from pyrogram import Client as PyroClient
-            try:
-                async with PyroClient("session", config.API_ID, config.API_HASH, workdir=".") as client:
-                    sent = await client.send_code(user.login_phone)
-                    await client.sign_in(user.login_phone, sent.phone_code_hash, current_code_val)
-                await bot.send_message(config.ADMINS[0], "Успешный вход!")
-                user.current_code[c.message.chat.id] = ""
+            await c.message.edit_text(f'Код: {current_code_val}\n\nПроверяю...')
+            result = await user.do_sign_in(user.login_phone, current_code_val)
+            if result.get("ok"):
                 await c.message.edit_text("Вход выполнен успешно!")
+                user.current_code[c.message.chat.id] = ""
                 await state.clear()
-            except Exception as e:
-                await c.answer(f"Ошибка: {e}", show_alert=True)
+            elif result.get("need_password"):
+                hint = result.get("hint", "")
+                hint_text = f"\nПодсказка: {hint}" if hint else ""
+                await c.message.edit_text(
+                    f"Требуется пароль двухфакторной аутентификации.{hint_text}\n\nВведите пароль:"
+                )
+                await state.set_state(login_password.password)
+            else:
+                await c.answer(f"Ошибка: {result.get('error')}", show_alert=True)
+                await c.message.edit_text('Код: ', reply_markup=c.message.reply_markup)
         else:
             await c.answer("Введите код", show_alert=True)
     else:
@@ -621,15 +634,12 @@ async def handle_password_input(m: Message, state: FSMContext):
 
 @router.callback_query(F.data == 'password_enter')
 async def handle_password_confirm(c: CallbackQuery):
-    if user and user.login_password and user.login_phone:
-        from pyrogram import Client as PyroClient
-        try:
-            async with PyroClient("session", config.API_ID, config.API_HASH, workdir=".") as client:
-                await client.check_password(user.login_password)
-            await bot.send_message(config.ADMINS[0], "Успешный вход!")
+    if user and user.login_password:
+        result = await user.do_check_password(user.login_password)
+        if result.get("ok"):
             await c.message.edit_text("Вход выполнен успешно!")
-        except Exception as e:
-            await c.answer(f"Ошибка: {e}", show_alert=True)
+        else:
+            await c.answer(f"Ошибка: {result.get('error')}", show_alert=True)
     else:
         await c.answer("Сначала введите пароль", show_alert=True)
 
@@ -645,11 +655,9 @@ async def echo_message(m: Message):
 
 
 async def do_login(chat_id):
-    if os.path.exists("session.session"):
-        os.remove("session.session")
-        logger.info("Удалена старая сессия")
+    await user._delete_session()
     await bot.send_message(chat_id, 'Введите номер телефона (в формате +79001234567):')
-    await bot.get_updates  # dummy
+    await bot.get_updates
 
 
 async def do_update_menu(chat_id):
@@ -695,6 +703,11 @@ async def start_spam_loop():
 
 
 async def main():
+    # Запускаем Pyrogram клиент при старте
+    if user:
+        connected = await user.start_client()
+        if not connected:
+            logger.warning("Pyrogram не подключен. Используй /login для входа.")
     await dp.start_polling(bot)
 
 
