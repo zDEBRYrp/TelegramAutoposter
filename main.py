@@ -249,6 +249,67 @@ async def list_channel_posts(message: Message):
         await message.answer(f'Ошибка: {e}')
 
 
+@router.callback_query(F.data.startswith('code_'))
+async def handle_code_button(c: CallbackQuery, state: FSMContext):
+    code_part = c.data.split('_')[1]
+    current_code_val = user.current_code.get(c.message.chat.id, "")
+
+    if code_part == 'back':
+        if current_code_val:
+            user.current_code[c.message.chat.id] = current_code_val[:-1]
+            await c.message.edit_text(
+                f'Введите код из Telegram:\nКод: {user.current_code[c.message.chat.id]}',
+                reply_markup=c.message.reply_markup)
+        else:
+            await c.answer("Код пустой")
+    elif code_part == 'enter':
+        if current_code_val and user.login_phone:
+            await c.message.edit_text(f'Код: {current_code_val}\n\nПроверяю...')
+            result = await user.do_sign_in(user.login_phone, current_code_val)
+            if result.get("ok"):
+                await c.message.edit_text("Вход выполнен успешно!")
+                user.current_code[c.message.chat.id] = ""
+                await state.clear()
+            elif result.get("need_password"):
+                hint = result.get("hint", "")
+                hint_text = f"\nПодсказка: {hint}" if hint else ""
+                await c.message.edit_text(
+                    f"Требуется пароль 2FA.{hint_text}\n\nВведите пароль:")
+                await state.set_state(login_password.password)
+            else:
+                await c.answer(f"Ошибка: {result.get('error')}", show_alert=True)
+                user.current_code[c.message.chat.id] = ""
+                await c.message.edit_text('Введите код из Telegram:\nКод: ',
+                                          reply_markup=c.message.reply_markup)
+        else:
+            await c.answer("Введите код", show_alert=True)
+    else:
+        if len(current_code_val) < 6:
+            user.current_code[c.message.chat.id] = current_code_val + code_part
+            await c.message.edit_text(
+                f'Введите код из Telegram:\nКод: {user.current_code[c.message.chat.id]}',
+                reply_markup=c.message.reply_markup)
+        else:
+            await c.answer("Максимум 6 цифр")
+
+
+@router.callback_query(F.data == 'password_enter')
+async def handle_password_confirm(c: CallbackQuery):
+    if user and user.login_password:
+        result = await user.do_check_password(user.login_password)
+        if result.get("ok"):
+            await c.message.edit_text("Вход выполнен успешно!")
+        else:
+            await c.answer(f"Ошибка: {result.get('error')}", show_alert=True)
+    else:
+        await c.answer("Сначала введите пароль", show_alert=True)
+
+
+@router.callback_query(F.data == 'password_cancel')
+async def handle_password_cancel(c: CallbackQuery):
+    await c.message.edit_text("Вход отменен.")
+
+
 @router.callback_query(F.data)
 async def callback_handler(c: CallbackQuery, state: FSMContext):
     data = c.data
@@ -670,82 +731,15 @@ async def handle_phone_input(m: Message, state: FSMContext):
         await m.answer('Неверный формат. Пример: +79001234567')
 
 
-@router.callback_query(F.data.startswith('code_'))
-async def handle_code_button(c: CallbackQuery, state: FSMContext):
-    code_part = c.data.split('_')[1]
-    current_code_val = user.current_code.get(c.message.chat.id, "")
-
-    if code_part == 'back':
-        if current_code_val:
-            user.current_code[c.message.chat.id] = current_code_val[:-1]
-            await c.message.edit_text(f'Код: {user.current_code[c.message.chat.id]}',
-                                       reply_markup=c.message.reply_markup)
-        else:
-            await c.answer("Код пустой")
-    elif code_part == 'enter':
-        if current_code_val and user.login_phone:
-            await c.message.edit_text(f'Код: {current_code_val}\n\nПроверяю...')
-            result = await user.do_sign_in(user.login_phone, current_code_val)
-            if result.get("ok"):
-                await c.message.edit_text("Вход выполнен успешно!")
-                user.current_code[c.message.chat.id] = ""
-                await state.clear()
-            elif result.get("need_password"):
-                hint = result.get("hint", "")
-                hint_text = f"\nПодсказка: {hint}" if hint else ""
-                await c.message.edit_text(
-                    f"Требуется пароль двухфакторной аутентификации.{hint_text}\n\nВведите пароль:"
-                )
-                await state.set_state(login_password.password)
-            else:
-                await c.answer(f"Ошибка: {result.get('error')}", show_alert=True)
-                await c.message.edit_text('Код: ', reply_markup=c.message.reply_markup)
-        else:
-            await c.answer("Введите код", show_alert=True)
-    else:
-        if len(current_code_val) < 6:
-            user.current_code[c.message.chat.id] = current_code_val + code_part
-            await c.message.edit_text(f'Код: {user.current_code[c.message.chat.id]}',
-                                       reply_markup=c.message.reply_markup)
-        else:
-            await c.answer("Максимум 6 цифр")
 
 
 @router.message(login_code.code)
 async def handle_code_text(m: Message, state: FSMContext):
-    await m.delete()
-    await m.answer('Используйте кнопки для ввода кода.')
-
-
-@router.message(login_password.password)
-async def handle_password_input(m: Message, state: FSMContext):
     try:
         await m.delete()
     except:
         pass
-    user.login_password = m.text
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='Подтвердить', callback_data='password_enter')],
-        [InlineKeyboardButton(text='Отмена', callback_data='password_cancel')]
-    ])
-    await m.answer('Пароль получен. Подтвердить?', reply_markup=keyboard)
-
-
-@router.callback_query(F.data == 'password_enter')
-async def handle_password_confirm(c: CallbackQuery):
-    if user and user.login_password:
-        result = await user.do_check_password(user.login_password)
-        if result.get("ok"):
-            await c.message.edit_text("Вход выполнен успешно!")
-        else:
-            await c.answer(f"Ошибка: {result.get('error')}", show_alert=True)
-    else:
-        await c.answer("Сначала введите пароль", show_alert=True)
-
-
-@router.callback_query(F.data == 'password_cancel')
-async def handle_password_cancel(c: CallbackQuery):
-    await c.message.edit_text("Вход отменен.")
+    await m.answer('Используйте кнопки для ввода кода.')
 
 
 @router.message(F.text)
