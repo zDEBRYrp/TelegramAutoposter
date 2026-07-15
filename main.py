@@ -163,6 +163,10 @@ class channel_time(StatesGroup):
     timeout = State()
 
 
+class add_chat_state(StatesGroup):
+    id = State()
+
+
 @router.message(Command("start"))
 async def process_start_command(m: Message):
     if config and m.chat.id in config.ADMINS:
