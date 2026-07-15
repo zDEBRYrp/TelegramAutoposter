@@ -1,22 +1,35 @@
 #!/bin/bash
+
+# Переходим в директорию скрипта
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
 echo "Запуск Autoposter 4.0..."
 
-if ! command -v python3 &> /dev/null; then
-    echo "Python3 не найден. Установите Python 3.8+"
+# Определяем python
+if command -v python3 &> /dev/null; then
+    PYTHON=python3
+elif command -v python &> /dev/null; then
+    PYTHON=python
+else
+    echo "Python не найден. Установите Python 3.8+"
     exit 1
 fi
 
+# Создаём venv если нет
 if [ ! -d "venv" ]; then
     echo "Создание виртуального окружения..."
-    python3 -m venv venv
+    $PYTHON -m venv venv
 fi
 
-echo "Активация виртуального окружения..."
+# Активируем venv
 source venv/bin/activate
 
+# Устанавливаем зависимости если нужно
 if [ ! -f "venv/requirements_installed.txt" ] || [ requirements.txt -nt venv/requirements_installed.txt ]; then
     echo "Установка зависимостей..."
-    pip install --quiet -r requirements.txt
+    pip install --upgrade pip --quiet
+    pip install -r requirements.txt
     touch venv/requirements_installed.txt
 fi
 
