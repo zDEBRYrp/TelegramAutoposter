@@ -37,6 +37,11 @@ async def start_client() -> bool:
     if client and client.is_connected:
         return True
 
+    # Не запускаем если нет файла сессии — иначе Pyrogram запросит телефон в консоли
+    if not os.path.exists("session.session"):
+        logger.info("Файл сессии не найден. Используй /login для входа.")
+        return False
+
     client = make_client()
     try:
         await client.start()

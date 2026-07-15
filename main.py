@@ -657,7 +657,6 @@ async def echo_message(m: Message):
 async def do_login(chat_id):
     await user._delete_session()
     await bot.send_message(chat_id, 'Введите номер телефона (в формате +79001234567):')
-    await bot.get_updates
 
 
 async def do_update_menu(chat_id):
