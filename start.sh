@@ -5,33 +5,27 @@ cd "$SCRIPT_DIR"
 
 echo "Запуск Autoposter 4.0..."
 
+# Устанавливаем pip и venv если нет
+if ! python3 -m pip --version &> /dev/null; then
+    echo "Устанавливаю pip и python3-venv..."
+    apt-get update -q
+    apt-get install -y python3-pip python3-venv
+fi
+
 # Создаём venv если нет
 if [ ! -d "venv" ]; then
     echo "Создание виртуального окружения..."
-    python3 -m venv venv 2>&1
-    # Если папка так и не создалась - устанавливаем python3-venv
-    if [ ! -d "venv" ]; then
-        echo "Устанавливаю python3-venv..."
-        apt-get install -y python3-venv python3-pip 2>&1
-        python3 -m venv venv 2>&1
-    fi
+    python3 -m venv venv
 fi
 
-# Финальная проверка
-if [ ! -f "venv/bin/activate" ]; then
-    echo "Не удалось создать venv. Запускаю без него..."
-    python3 -m pip install -r requirements.txt --break-system-packages -q
-    python3 main.py
-    exit $?
-fi
-
-echo "Активация venv..."
+# Активируем
 source venv/bin/activate
 
-echo "Установка зависимостей..."
-pip install --upgrade pip -q
-pip install -r requirements.txt -q
-if [ $? -eq 0 ]; then
+# Устанавливаем зависимости
+if [ ! -f "venv/requirements_installed.txt" ] || [ requirements.txt -nt venv/requirements_installed.txt ]; then
+    echo "Установка зависимостей..."
+    pip install --upgrade pip -q
+    pip install -r requirements.txt
     touch venv/requirements_installed.txt
 fi
 
