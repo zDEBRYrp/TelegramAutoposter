@@ -12,16 +12,22 @@ if ! python3 -m pip --version &> /dev/null; then
     apt-get install -y python3-pip python3-venv
 fi
 
-# Создаём venv если нет
-if [ ! -d "venv" ]; then
+# Удаляем сломанный venv и создаём заново
+if [ ! -f "venv/bin/activate" ]; then
     echo "Создание виртуального окружения..."
+    rm -rf venv
     python3 -m venv venv
 fi
 
-# Активируем
+# Финальная проверка
+if [ ! -f "venv/bin/activate" ]; then
+    echo "ОШИБКА: не удалось создать venv"
+    exit 1
+fi
+
+echo "Активация venv..."
 source venv/bin/activate
 
-# Устанавливаем зависимости
 if [ ! -f "venv/requirements_installed.txt" ] || [ requirements.txt -nt venv/requirements_installed.txt ]; then
     echo "Установка зависимостей..."
     pip install --upgrade pip -q
