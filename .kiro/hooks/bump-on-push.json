@@ -1,0 +1,14 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Bump version before git push",
+      "trigger": "PreToolUse",
+      "matcher": "execute_pwsh",
+      "action": {
+        "type": "command",
+        "command": "echo \"Pre-push version bump reminder active\""
+      }
+    }
+  ]
+}

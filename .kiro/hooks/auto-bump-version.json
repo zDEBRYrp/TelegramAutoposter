@@ -1,0 +1,13 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Auto bump version on commit",
+      "trigger": "PostTaskExec",
+      "action": {
+        "type": "agent",
+        "prompt": "After completing any task that involves code changes, always:\n1. Run `python bump_version.py patch` in the project directory to bump the version\n2. Update README.md title to match new version\n3. Include version.txt and README.md in the git commit\n4. Use the new version number in the commit message format: \"vX.X.X - description\""
+      }
+    }
+  ]
+}

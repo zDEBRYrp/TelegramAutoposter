@@ -146,6 +146,8 @@ class channel_time(StatesGroup):
 
 class add_chat_state(StatesGroup):
     id = State()
+    username = State()
+    link = State()
 
 
 @router.message(Command("start"))
@@ -276,14 +278,59 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
 
     elif data == 'ADD_CHAT':
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text='Ввести ID вручную', callback_data='INPUT_CHAT_ID')],
+            [InlineKeyboardButton(text='🔢 По ID', callback_data='INPUT_CHAT_ID')],
+            [InlineKeyboardButton(text='📛 По username (@channel)', callback_data='INPUT_CHAT_USERNAME')],
+            [InlineKeyboardButton(text='🔗 По ссылке (t.me/...)', callback_data='INPUT_CHAT_LINK')],
+            [InlineKeyboardButton(text='📋 Из моих диалогов', callback_data='INPUT_CHAT_DIALOGS')],
             [InlineKeyboardButton(text='Назад', callback_data='BACK_TO_CHATS')]
         ])
         await c.message.edit_text('Выберите способ добавления чата:', reply_markup=keyboard)
 
     elif data == 'INPUT_CHAT_ID':
-        await c.message.edit_text('Отправьте ID чата:')
+        await c.message.edit_text('Отправьте ID чата (например: -1001234567890):')
         await state.set_state(add_chat_state.id)
+
+    elif data == 'INPUT_CHAT_USERNAME':
+        await c.message.edit_text('Отправьте username чата (например: @mychannel):')
+        await state.set_state(add_chat_state.username)
+
+    elif data == 'INPUT_CHAT_LINK':
+        await c.message.edit_text('Отправьте ссылку на чат (например: https://t.me/mychannel):')
+        await state.set_state(add_chat_state.link)
+
+    elif data == 'INPUT_CHAT_DIALOGS':
+        if not await user.ensure_connected():
+            await c.answer('Pyrogram не подключен. Используй /login', show_alert=True)
+            return
+        chats = await user.get_chats()
+        if not chats:
+            await c.message.edit_text('Нет доступных диалогов.')
+            return
+        db_chats = db.c.execute('SELECT CHANNEL FROM CHANNELS').fetchall()
+        db_ids = {str(row[0]) for row in db_chats}
+        new_chats = [ch for ch in chats if str(ch['id']) not in db_ids]
+        if not new_chats:
+            await c.message.edit_text('Все доступные чаты уже добавлены.')
+            return
+        per_page = 10
+        rows = []
+        for ch in new_chats[:per_page]:
+            rows.append([InlineKeyboardButton(
+                text=f'➕ {ch["title"]}',
+                callback_data=f'ADD_CHAT_FROM_DIALOG:{ch["id"]}'
+            )])
+        if len(new_chats) > per_page:
+            rows.append([InlineKeyboardButton(text=f'Показано {per_page}/{len(new_chats)}', callback_data='PAGINATION')])
+        rows.append([InlineKeyboardButton(text='Назад', callback_data='ADD_CHAT')])
+        await c.message.edit_text('Выберите чат для добавления:', reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+    elif data.startswith('ADD_CHAT_FROM_DIALOG:'):
+        chat_id = int(data.split(':')[1])
+        try:
+            db.add_channel(chat_id)
+            await c.message.edit_text(f'Чат {chat_id} успешно добавлен!')
+        except Exception as e:
+            await c.answer(f'Ошибка: {e}', show_alert=True)
 
     elif data == 'BACK_TO_CHATS':
         keyboard = await get_chats_keyboard(0)
@@ -390,7 +437,59 @@ async def input_chat_id(m: Message, state: FSMContext):
         db.add_channel(chat_id)
         await bot.send_message(m.chat.id, f'Чат {chat_id} успешно добавлен!')
     except ValueError:
-        await bot.send_message(m.chat.id, 'ID должен быть числом.')
+        await bot.send_message(m.chat.id, 'ID должен быть числом. Попробуйте снова:')
+        return
+    except Exception as e:
+        await bot.send_message(m.chat.id, f'Ошибка: {e}')
+    finally:
+        await state.clear()
+
+
+@router.message(add_chat_state.username)
+async def input_chat_username(m: Message, state: FSMContext):
+    username = m.text.strip()
+    try:
+        await m.delete()
+    except:
+        pass
+    try:
+        if not await user.ensure_connected():
+            await bot.send_message(m.chat.id, 'Pyrogram не подключен. Используй /login')
+            await state.clear()
+            return
+        username = username.lstrip('@')
+        chat = await user.client.get_chat(username)
+        db.add_channel(chat.id)
+        await bot.send_message(m.chat.id, f'Чат @{username} (ID: {chat.id}) успешно добавлен!')
+    except Exception as e:
+        await bot.send_message(m.chat.id, f'Ошибка: {e}')
+    finally:
+        await state.clear()
+
+
+@router.message(add_chat_state.link)
+async def input_chat_link(m: Message, state: FSMContext):
+    link = m.text.strip()
+    try:
+        await m.delete()
+    except:
+        pass
+    try:
+        if not await user.ensure_connected():
+            await bot.send_message(m.chat.id, 'Pyrogram не подключен. Используй /login')
+            await state.clear()
+            return
+        # Извлекаем username из ссылки
+        import re as _re
+        match = _re.search(r't\.me/(?:joinchat/|[+])?([a-zA-Z0-9_]+)', link)
+        if not match:
+            await bot.send_message(m.chat.id, 'Неверный формат ссылки. Пример: https://t.me/mychannel')
+            await state.clear()
+            return
+        username = match.group(1)
+        chat = await user.client.get_chat(username)
+        db.add_channel(chat.id)
+        await bot.send_message(m.chat.id, f'Чат {chat.title} (ID: {chat.id}) успешно добавлен!')
     except Exception as e:
         await bot.send_message(m.chat.id, f'Ошибка: {e}')
     finally:
