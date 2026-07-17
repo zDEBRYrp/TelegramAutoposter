@@ -74,11 +74,14 @@ def channel_post_keyboard():
 
 
 def get_chat_settings_keyboard(chat_id):
+    spam_status = db.get_channel_spam_status(chat_id)
+    spam_text = '🛑 Остановить спам' if spam_status == 1 else '▶️ Включить спам'
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text='Изменить задержку', callback_data=f'CHANGE_TIMEOUT:{chat_id}')],
         [InlineKeyboardButton(text='Изменить пост', callback_data=f'EDIT_CHANNEL_POST:{chat_id}')],
         [InlineKeyboardButton(text='Доп. текст', callback_data=f'ADD_ADDITIONAL:{chat_id}')],
-        [InlineKeyboardButton(text='❌ Удалить чат', callback_data=f'LFC:{chat_id}')]
+        [InlineKeyboardButton(text=spam_text, callback_data=f'TOGGLE_SPAM_SETTINGS:{chat_id}')],
+        [InlineKeyboardButton(text='Назад', callback_data='BACK_TO_CHATS')]
     ])
 
 
@@ -91,9 +94,15 @@ async def get_chats_keyboard(page=0):
 
     keyboard = []
     for chat in page_chats:
+        # Проверяем статус спама для чата
+        spam_status = db.get_channel_spam_status(chat['id'])
+        icon = '✅' if spam_status == 1 else '⬜'
         keyboard.append([
-            InlineKeyboardButton(text=f'❌ {chat["title"]}', callback_data=f'DELETE_CHAT:{chat["id"]}'),
-            InlineKeyboardButton(text=f'⚙️ {chat["title"]}', callback_data=f'EDIT_CHAT:{chat["id"]}')
+            InlineKeyboardButton(
+                text=f'{icon} {chat["title"]}',
+                callback_data=f'TOGGLE_SPAM:{chat["id"]}'
+            ),
+            InlineKeyboardButton(text='⚙️', callback_data=f'EDIT_CHAT:{chat["id"]}')
         ])
 
     if len(chats) > per_page:
@@ -319,14 +328,31 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         keyboard = await get_chats_keyboard(page)
         await c.message.edit_reply_markup(reply_markup=keyboard)
 
-    elif data.startswith('DELETE_CHAT:'):
+    elif data.startswith('TOGGLE_SPAM:'):
         chat_id = int(data.split(':')[1])
-        log = await user.leave_from_channel(chat_id) if user else False
-        if log:
-            keyboard = await get_chats_keyboard(0)
-            await c.message.edit_text('Вы успешно покинули чат.', reply_markup=keyboard)
+        current = db.get_channel_spam_status(chat_id)
+        if current == 1:
+            db.stop_spam_for_channel(chat_id)
         else:
-            await c.answer('Не удалось покинуть чат', show_alert=True)
+            db.c.execute('UPDATE CHANNELS SET SPAM_ENABLED = 1 WHERE CHANNEL = ?', [str(chat_id)])
+            db.conn.commit()
+        keyboard = await get_chats_keyboard(0)
+        await c.message.edit_reply_markup(reply_markup=keyboard)
+
+    elif data.startswith('TOGGLE_SPAM_SETTINGS:'):
+        chat_id = int(data.split(':')[1])
+        current = db.get_channel_spam_status(chat_id)
+        if current == 1:
+            db.stop_spam_for_channel(chat_id)
+        else:
+            db.c.execute('UPDATE CHANNELS SET SPAM_ENABLED = 1 WHERE CHANNEL = ?', [str(chat_id)])
+            db.conn.commit()
+        addit = db.get_additional_text(chat_id)
+        addit_val = addit[0] if addit and addit[0] else 'не задан'
+        post_data = db.get_channel_post(chat_id)
+        has_post = post_data and (post_data[0] or post_data[1] or post_data[2])
+        info = f'Чат: {chat_id}\nДоп. текст: {addit_val}\nИндив. пост: {"есть" if has_post else "нет"}'
+        await c.message.edit_text(info, reply_markup=get_chat_settings_keyboard(chat_id))
 
     elif data.startswith('EDIT_CHAT:'):
         chat_id = int(data.split(':')[1])
@@ -334,7 +360,11 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         addit_val = addit[0] if addit and addit[0] else 'не задан'
         post_data = db.get_channel_post(chat_id)
         has_post = post_data and (post_data[0] or post_data[1] or post_data[2])
-        info = f'Чат: {chat_id}\nДоп. текст: {addit_val}\nИндив. пост: {"есть" if has_post else "нет"}'
+        spam_status = db.get_channel_spam_status(chat_id)
+        info = (f'Чат: {chat_id}\n'
+                f'Спам: {"✅ включен" if spam_status == 1 else "⬜ выключен"}\n'
+                f'Доп. текст: {addit_val}\n'
+                f'Индив. пост: {"есть" if has_post else "нет"}')
         await c.message.edit_text(info, reply_markup=get_chat_settings_keyboard(chat_id))
 
     elif data == 'ADD_CHAT':
@@ -396,14 +426,6 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
     elif data == 'BACK_TO_CHATS':
         keyboard = await get_chats_keyboard(0)
         await c.message.edit_text('Доступные чаты:', reply_markup=keyboard)
-
-    elif data.startswith('LFC:'):
-        chat_id = int(data.split(':')[1])
-        log = await user.leave_from_channel(chat_id) if user else False
-        if log:
-            await c.message.edit_text(f'Вы покинули чат {chat_id}.')
-        else:
-            await c.answer('Не удалось покинуть чат', show_alert=True)
 
     elif data.startswith('CHANGE_TIMEOUT:'):
         chat_id = int(data.split(':')[1])
