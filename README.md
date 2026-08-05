@@ -1,4 +1,4 @@
-# TelegramAutoposter 1.1.9
+# TelegramAutoposter 1.2.0
 
 Telegram-бот для автоматической рассылки постов в супергруппы.
 

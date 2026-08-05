@@ -211,9 +211,13 @@ async def return_menu(message: Message):
 @router.message(F.text == 'Пост')
 async def post_settings(message: Message):
     settings = db.settings()
-    text_html = markdown_to_html(settings[2]) if settings[2] else ''
-    has_photo = bool(settings[1])
-    has_video = bool(settings[3])
+    # settings: [0]=ID, [1]=PHOTO, [2]=VIDEO, [3]=TEXT, [4]=SPAM, [5]=TIMEOUT
+    photo = settings[1]
+    video = settings[2]
+    text = settings[3]
+    text_html = markdown_to_html(text) if text else ''
+    has_photo = bool(photo)
+    has_video = bool(video)
 
     lines = []
     if has_photo:
@@ -221,7 +225,7 @@ async def post_settings(message: Message):
     if has_video:
         lines.append('📹 Видео: установлено')
     if text_html:
-        lines.append(f'📝 Текст: есть')
+        lines.append('📝 Текст: есть')
     if not lines:
         lines.append('❌ Пост пуст')
 
@@ -547,9 +551,11 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
 
     elif data == 'VIEW_GLOBAL_POST':
         settings = db.settings()
-        text_html = markdown_to_html(settings[2]) if settings[2] else ''
+        # settings: [0]=ID, [1]=PHOTO, [2]=VIDEO, [3]=TEXT, [4]=SPAM, [5]=TIMEOUT
         photo = settings[1]
-        video = settings[3]
+        video = settings[2]
+        text = settings[3]
+        text_html = markdown_to_html(text) if text else ''
         try:
             if photo:
                 photo_path = f'{config.DIR}{photo}' if config and config.DIR else photo

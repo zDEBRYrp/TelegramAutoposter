@@ -250,13 +250,17 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                             if text:
                                 await client.send_message(chat['id'], text)
                     else:
-                        text = settings[2] or ''
+                        # settings: [0]=ID, [1]=PHOTO, [2]=VIDEO, [3]=TEXT, [4]=SPAM, [5]=TIMEOUT
+                        text = settings[3] or ''
                         if chat.get('text'):
                             text = f"{text}\n\n{chat['text']}" if text else chat['text']
 
                         if settings[1]:
                             photo_path = f"{config.DIR}{settings[1]}" if config.DIR else settings[1]
                             await _send_with_fallback(chat['id'], text, photo_path=photo_path)
+                        elif settings[2]:
+                            video_path = f"{config.DIR}{settings[2]}" if config.DIR else settings[2]
+                            await _send_with_fallback(chat['id'], text, video_path=video_path)
                         else:
                             if text:
                                 await client.send_message(chat['id'], text)
