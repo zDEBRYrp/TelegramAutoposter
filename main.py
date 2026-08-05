@@ -212,29 +212,34 @@ async def return_menu(message: Message):
 async def post_settings(message: Message):
     settings = db.settings()
     text_html = markdown_to_html(settings[2]) if settings[2] else ''
-    try:
-        photo_path = f'{config.DIR}{settings[1]}' if config and config.DIR else settings[1]
-        video_path = f'{config.DIR}{settings[3]}' if config and config.DIR else settings[3]
-        if settings[1] and os.path.exists(photo_path):
-            await bot.send_photo(message.chat.id, photo_path, caption=text_html or ' ')
-        elif settings[3] and os.path.exists(video_path):
-            await bot.send_video(message.chat.id, video_path, caption=text_html or ' ')
-        elif text_html:
-            await bot.send_message(message.chat.id, text_html)
-        else:
-            await bot.send_message(message.chat.id, 'Пост пуст')
-    except Exception as e:
-        logger.error(f"Ошибка отправки поста: {e}")
-        await bot.send_message(message.chat.id, 'Ошибка отправки поста')
+    has_photo = bool(settings[1])
+    has_video = bool(settings[3])
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='Изменить текст', callback_data='EDIT_TEXT')],
-        [InlineKeyboardButton(text='Изменить фото', callback_data='EDIT_PHOTO'),
-         InlineKeyboardButton(text='Изменить видео', callback_data='EDIT_VIDEO')],
-        [InlineKeyboardButton(text='Удалить медиа', callback_data='DEL_MEDIA')],
-        [InlineKeyboardButton(text='Интервал по умолчанию', callback_data='INTERVAL')]
+    lines = []
+    if has_photo:
+        lines.append('📷 Фото: установлено')
+    if has_video:
+        lines.append('📹 Видео: установлено')
+    if text_html:
+        lines.append(f'📝 Текст: есть')
+    if not lines:
+        lines.append('❌ Пост пуст')
+
+    info = '\n'.join(lines)
+
+    keyboard_rows = []
+    if has_photo or has_video or text_html:
+        keyboard_rows.append([InlineKeyboardButton(text='👁 Просмотреть пост', callback_data='VIEW_GLOBAL_POST')])
+    keyboard_rows.append([InlineKeyboardButton(text='Изменить текст', callback_data='EDIT_TEXT')])
+    keyboard_rows.append([
+        InlineKeyboardButton(text='Изменить фото', callback_data='EDIT_PHOTO'),
+        InlineKeyboardButton(text='Изменить видео', callback_data='EDIT_VIDEO')
     ])
-    await message.answer('Настройки глобального поста:', reply_markup=keyboard)
+    keyboard_rows.append([InlineKeyboardButton(text='Удалить медиа', callback_data='DEL_MEDIA')])
+    keyboard_rows.append([InlineKeyboardButton(text='Интервал по умолчанию', callback_data='INTERVAL')])
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+    await message.answer(f'Глобальный пост:\n{info}', reply_markup=keyboard)
 
 @router.message(F.text == 'Запустить спам')
 async def start_spam_cmd(message: Message):
@@ -539,6 +544,42 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
     elif data == 'EDIT_TEXT':
         await c.message.edit_text('Введите текст глобального поста:')
         await state.set_state(post.text)
+
+    elif data == 'VIEW_GLOBAL_POST':
+        settings = db.settings()
+        text_html = markdown_to_html(settings[2]) if settings[2] else ''
+        photo = settings[1]
+        video = settings[3]
+        try:
+            if photo:
+                photo_path = f'{config.DIR}{photo}' if config and config.DIR else photo
+                sent = False
+                for ext in ['.jpg', '.jpeg', '.png', '.webp', '']:
+                    p = photo_path + ext if ext else photo_path
+                    if os.path.exists(p):
+                        await bot.send_photo(c.message.chat.id, p, caption=text_html or None)
+                        sent = True
+                        break
+                if not sent:
+                    await bot.send_message(c.message.chat.id, f'Файл фото не найден на диске.\n{text_html}')
+            elif video:
+                video_path = f'{config.DIR}{video}' if config and config.DIR else video
+                sent = False
+                for ext in ['.mp4', '.mov', '.webm', '']:
+                    p = video_path + ext if ext else video_path
+                    if os.path.exists(p):
+                        await bot.send_video(c.message.chat.id, p, caption=text_html or None)
+                        sent = True
+                        break
+                if not sent:
+                    await bot.send_message(c.message.chat.id, f'Файл видео не найден на диске.\n{text_html}')
+            elif text_html:
+                await bot.send_message(c.message.chat.id, text_html)
+            else:
+                await c.answer('Пост пуст', show_alert=True)
+        except Exception as e:
+            await c.answer(f'Ошибка просмотра: {e}', show_alert=True)
+        await c.answer()
 
     elif data == 'EDIT_PHOTO':
         await c.message.edit_text('Отправь фото для глобального поста:')
