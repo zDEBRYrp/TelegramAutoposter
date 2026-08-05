@@ -88,13 +88,27 @@ def get_chat_settings_keyboard(chat_id):
 async def get_chats_keyboard(page=0):
     chats = await user.get_chats() if user else []
     per_page = 10
+
+    # Убедимся что все чаты есть в БД (новые добавляем как выключенные)
+    for chat in chats:
+        existing = db.c.execute('SELECT CHANNEL FROM CHANNELS WHERE CHANNEL = ?', [str(chat['id'])]).fetchone()
+        if not existing:
+            db.c.execute('INSERT INTO CHANNELS (CHANNEL, ADDITIONAL, SPAM_ENABLED, TIMEOUT) VALUES (?, ?, ?, ?)',
+                         [str(chat['id']), '', 0, 5])
+            db.conn.commit()
+
+    # Сортируем: включённые сверху
+    def sort_key(chat):
+        return 0 if db.get_channel_spam_status(chat['id']) == 1 else 1
+
+    chats.sort(key=sort_key)
+
     start = page * per_page
     end = start + per_page
     page_chats = chats[start:end]
 
     keyboard = []
     for chat in page_chats:
-        # Проверяем статус спама для чата
         spam_status = db.get_channel_spam_status(chat['id'])
         icon = '✅' if spam_status == 1 else '⬜'
         keyboard.append([
@@ -326,7 +340,10 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
     if data.startswith('CHATS_PAGE:'):
         page = int(data.split(':')[1])
         keyboard = await get_chats_keyboard(page)
-        await c.message.edit_reply_markup(reply_markup=keyboard)
+        try:
+            await c.message.edit_reply_markup(reply_markup=keyboard)
+        except Exception:
+            pass
 
     elif data.startswith('TOGGLE_SPAM:'):
         chat_id = int(data.split(':')[1])
@@ -337,7 +354,10 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
             db.c.execute('UPDATE CHANNELS SET SPAM_ENABLED = 1 WHERE CHANNEL = ?', [str(chat_id)])
             db.conn.commit()
         keyboard = await get_chats_keyboard(0)
-        await c.message.edit_reply_markup(reply_markup=keyboard)
+        try:
+            await c.message.edit_reply_markup(reply_markup=keyboard)
+        except Exception:
+            await c.answer('Обновлено')
 
     elif data.startswith('TOGGLE_SPAM_SETTINGS:'):
         chat_id = int(data.split(':')[1])
@@ -425,7 +445,10 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
 
     elif data == 'BACK_TO_CHATS':
         keyboard = await get_chats_keyboard(0)
-        await c.message.edit_text('Доступные чаты:', reply_markup=keyboard)
+        try:
+            await c.message.edit_text('Доступные чаты:', reply_markup=keyboard)
+        except Exception:
+            await c.message.edit_reply_markup(reply_markup=keyboard)
 
     elif data.startswith('CHANGE_TIMEOUT:'):
         chat_id = int(data.split(':')[1])

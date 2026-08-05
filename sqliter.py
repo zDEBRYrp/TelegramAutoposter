@@ -180,7 +180,7 @@ class DBConnection(object):
     def add_channel(self, channel_id: int) -> bool:
         try:
             self.c.execute('INSERT OR IGNORE INTO CHANNELS (CHANNEL, ADDITIONAL, SPAM_ENABLED, TIMEOUT) VALUES (?, ?, ?, ?)',
-                          [str(channel_id), '', 1, 5])
+                          [str(channel_id), '', 0, 5])
             self.conn.commit()
             return True
         except Exception as e:
