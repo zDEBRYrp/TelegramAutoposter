@@ -14,19 +14,35 @@ except ImportError:
 
 
 def markdown_to_html(text: str) -> str:
-    if not HAS_MARKDOWN or not text:
+    """Конвертирует Markdown в HTML для Telegram."""
+    if not text:
         return text
-    try:
-        html = markdown2.markdown(text, extras=['tables', 'fenced-code-blocks'])
-        text = html
-        import re
-        text = re.sub(r'<[^>]+>', '', text)
-        text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
-        text = re.sub(r'<strong>(.+?)</strong>', r'*\1*', text)
-        text = re.sub(r'_([^_]+)_', r'_\1_', text)
-        return text.strip()
-    except Exception:
-        return text
+    import re
+
+    # Экранируем HTML спецсимволы сначала
+    text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+    # Жирный **text** или __text__
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
+    text = re.sub(r'__(.+?)__', r'<b>\1</b>', text, flags=re.DOTALL)
+
+    # Курсив *text* или _text_
+    text = re.sub(r'\*([^*\n]+?)\*', r'<i>\1</i>', text)
+    text = re.sub(r'(?<!\w)_([^_\n]+?)_(?!\w)', r'<i>\1</i>', text)
+
+    # Зачёркнутый ~~text~~
+    text = re.sub(r'~~(.+?)~~', r'<s>\1</s>', text, flags=re.DOTALL)
+
+    # Моноширинный `code`
+    text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
+
+    # Блок кода ```code```
+    text = re.sub(r'```(?:\w+\n)?(.*?)```', r'<pre>\1</pre>', text, flags=re.DOTALL)
+
+    # Ссылки [text](url)
+    text = re.sub(r'\[(.+?)\]\((https?://[^\)]+)\)', r'<a href="\2">\1</a>', text)
+
+    return text
 
 
 class DBConnection(object):

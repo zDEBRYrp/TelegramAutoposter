@@ -503,21 +503,21 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
                 for ext in ['.jpg', '.jpeg', '.png', '.webp', '']:
                     p = photo_path + ext if ext else photo_path
                     if os.path.exists(p):
-                        await bot.send_photo(c.message.chat.id, p, caption=text_html or None)
+                        await bot.send_photo(c.message.chat.id, p, caption=text_html or None, parse_mode=ParseMode.HTML)
                         break
                 else:
-                    await bot.send_message(c.message.chat.id, f'Фото не найдено на диске.\n{text_html}')
+                    await bot.send_message(c.message.chat.id, f'Фото не найдено на диске.\n{text_html}', parse_mode=ParseMode.HTML)
             elif video:
                 video_path = f'{config.DIR}{video}' if config and config.DIR else video
                 for ext in ['.mp4', '.mov', '.webm', '']:
                     p = video_path + ext if ext else video_path
                     if os.path.exists(p):
-                        await bot.send_video(c.message.chat.id, p, caption=text_html or None)
+                        await bot.send_video(c.message.chat.id, p, caption=text_html or None, parse_mode=ParseMode.HTML)
                         break
                 else:
-                    await bot.send_message(c.message.chat.id, f'Видео не найдено на диске.\n{text_html}')
+                    await bot.send_message(c.message.chat.id, f'Видео не найдено на диске.\n{text_html}', parse_mode=ParseMode.HTML)
             elif text_html:
-                await bot.send_message(c.message.chat.id, text_html)
+                await bot.send_message(c.message.chat.id, text_html, parse_mode=ParseMode.HTML)
         except Exception as e:
             await c.answer(f'Ошибка просмотра: {e}', show_alert=True)
         await c.answer()
@@ -563,24 +563,24 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
                 for ext in ['.jpg', '.jpeg', '.png', '.webp', '']:
                     p = photo_path + ext if ext else photo_path
                     if os.path.exists(p):
-                        await bot.send_photo(c.message.chat.id, p, caption=text_html or None)
+                        await bot.send_photo(c.message.chat.id, p, caption=text_html or None, parse_mode=ParseMode.HTML)
                         sent = True
                         break
                 if not sent:
-                    await bot.send_message(c.message.chat.id, f'Файл фото не найден на диске.\n{text_html}')
+                    await bot.send_message(c.message.chat.id, f'Файл не найден.\n{text_html}', parse_mode=ParseMode.HTML)
             elif video:
                 video_path = f'{config.DIR}{video}' if config and config.DIR else video
                 sent = False
                 for ext in ['.mp4', '.mov', '.webm', '']:
                     p = video_path + ext if ext else video_path
                     if os.path.exists(p):
-                        await bot.send_video(c.message.chat.id, p, caption=text_html or None)
+                        await bot.send_video(c.message.chat.id, p, caption=text_html or None, parse_mode=ParseMode.HTML)
                         sent = True
                         break
                 if not sent:
-                    await bot.send_message(c.message.chat.id, f'Файл видео не найден на диске.\n{text_html}')
+                    await bot.send_message(c.message.chat.id, f'Файл не найден.\n{text_html}', parse_mode=ParseMode.HTML)
             elif text_html:
-                await bot.send_message(c.message.chat.id, text_html)
+                await bot.send_message(c.message.chat.id, text_html, parse_mode=ParseMode.HTML)
             else:
                 await c.answer('Пост пуст', show_alert=True)
         except Exception as e:
@@ -709,7 +709,7 @@ async def input_additional_text(m: Message, state: FSMContext):
 async def input_post_text(m: Message, state: FSMContext):
     try:
         await m.delete()
-        db.change_text(markdown_to_html(m.text))
+        db.change_text(m.text)
         await bot.send_message(m.chat.id, 'Текст глобального поста обновлен!')
     except Exception as e:
         await bot.send_message(m.chat.id, f'Ошибка: {e}')
@@ -724,7 +724,7 @@ async def input_channel_post_text(m: Message, state: FSMContext):
     try:
         await m.delete()
         if chat_id:
-            db.set_channel_post(chat_id, text=markdown_to_html(m.text))
+            db.set_channel_post(chat_id, text=m.text)
             await bot.send_message(m.chat.id, 'Текст канального поста обновлен!')
         else:
             await bot.send_message(m.chat.id, 'Не найден ID чата.')

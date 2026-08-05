@@ -163,23 +163,25 @@ async def do_check_password(password: str) -> dict:
 
 async def _send_with_fallback(chat_id: int, text: str, photo_path: str = None, video_path: str = None):
     """Отправить медиа с fallback на текст если чат не поддерживает."""
+    from pyrogram.enums import ParseMode as PyroParseMode
+
     if photo_path:
         for ext in ['.jpg', '.jpeg', '.png', '.webp', '']:
             p = photo_path + ext if ext else photo_path
             if os.path.exists(p):
                 try:
-                    await client.send_photo(chat_id, p, caption=text or None)
+                    await client.send_photo(chat_id, p, caption=text or None, parse_mode=PyroParseMode.HTML)
                     return
                 except Exception as e:
                     err = str(e).lower()
                     if any(x in err for x in ['chat_send_photos_forbidden', 'media', 'forbidden']):
                         logger.warning(f"Фото запрещено в {chat_id}, отправляю текст")
                         if text:
-                            await client.send_message(chat_id, text)
+                            await client.send_message(chat_id, text, parse_mode=PyroParseMode.HTML)
                         return
                     raise
         if text:
-            await client.send_message(chat_id, text)
+            await client.send_message(chat_id, text, parse_mode=PyroParseMode.HTML)
         return
 
     if video_path:
@@ -187,22 +189,23 @@ async def _send_with_fallback(chat_id: int, text: str, photo_path: str = None, v
             p = video_path + ext if ext else video_path
             if os.path.exists(p):
                 try:
-                    await client.send_video(chat_id, p, caption=text or None)
+                    await client.send_video(chat_id, p, caption=text or None, parse_mode=PyroParseMode.HTML)
                     return
                 except Exception as e:
                     err = str(e).lower()
                     if any(x in err for x in ['chat_send_videos_forbidden', 'media', 'forbidden']):
                         logger.warning(f"Видео запрещено в {chat_id}, отправляю текст")
                         if text:
-                            await client.send_message(chat_id, text)
+                            await client.send_message(chat_id, text, parse_mode=PyroParseMode.HTML)
                         return
                     raise
         if text:
-            await client.send_message(chat_id, text)
+            await client.send_message(chat_id, text, parse_mode=PyroParseMode.HTML)
         return
 
     if text:
-        await client.send_message(chat_id, text)
+        from pyrogram.enums import ParseMode as PyroParseMode
+        await client.send_message(chat_id, text, parse_mode=PyroParseMode.HTML)
 
 
 async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None:
