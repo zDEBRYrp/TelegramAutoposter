@@ -161,6 +161,50 @@ async def do_check_password(password: str) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+async def _send_with_fallback(chat_id: int, text: str, photo_path: str = None, video_path: str = None):
+    """Отправить медиа с fallback на текст если чат не поддерживает."""
+    if photo_path:
+        for ext in ['.jpg', '.jpeg', '.png', '.webp', '']:
+            p = photo_path + ext if ext else photo_path
+            if os.path.exists(p):
+                try:
+                    await client.send_photo(chat_id, p, caption=text or None)
+                    return
+                except Exception as e:
+                    err = str(e).lower()
+                    if any(x in err for x in ['chat_send_photos_forbidden', 'media', 'forbidden']):
+                        logger.warning(f"Фото запрещено в {chat_id}, отправляю текст")
+                        if text:
+                            await client.send_message(chat_id, text)
+                        return
+                    raise
+        if text:
+            await client.send_message(chat_id, text)
+        return
+
+    if video_path:
+        for ext in ['.mp4', '.mov', '.webm', '']:
+            p = video_path + ext if ext else video_path
+            if os.path.exists(p):
+                try:
+                    await client.send_video(chat_id, p, caption=text or None)
+                    return
+                except Exception as e:
+                    err = str(e).lower()
+                    if any(x in err for x in ['chat_send_videos_forbidden', 'media', 'forbidden']):
+                        logger.warning(f"Видео запрещено в {chat_id}, отправляю текст")
+                        if text:
+                            await client.send_message(chat_id, text)
+                        return
+                    raise
+        if text:
+            await client.send_message(chat_id, text)
+        return
+
+    if text:
+        await client.send_message(chat_id, text)
+
+
 async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None:
     if not await ensure_connected():
         return
@@ -198,37 +242,24 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
 
                         if channel_post[0]:
                             photo_path = f"{config.DIR}{channel_post[0]}" if config.DIR else channel_post[0]
-                            for ext in ['.jpg', '.jpeg', '.png', '.webp', '']:
-                                p = photo_path + ext if ext else photo_path
-                                if os.path.exists(p):
-                                    await client.send_photo(chat['id'], p, caption=text)
-                                    break
+                            await _send_with_fallback(chat['id'], text, photo_path=photo_path)
                         elif channel_post[1]:
                             video_path = f"{config.DIR}{channel_post[1]}" if config.DIR else channel_post[1]
-                            for ext in ['.mp4', '.mov', '.webm', '']:
-                                p = video_path + ext if ext else video_path
-                                if os.path.exists(p):
-                                    await client.send_video(chat['id'], p, caption=text)
-                                    break
-                        elif text:
-                            await client.send_message(chat['id'], text)
+                            await _send_with_fallback(chat['id'], text, video_path=video_path)
+                        else:
+                            if text:
+                                await client.send_message(chat['id'], text)
                     else:
                         text = settings[2] or ''
                         if chat.get('text'):
                             text = f"{text}\n\n{chat['text']}" if text else chat['text']
 
-                        sent = False
                         if settings[1]:
                             photo_path = f"{config.DIR}{settings[1]}" if config.DIR else settings[1]
-                            for ext in ['.jpg', '.jpeg', '.png', '.webp', '']:
-                                p = photo_path + ext if ext else photo_path
-                                if os.path.exists(p):
-                                    await client.send_photo(chat['id'], p, caption=text)
-                                    sent = True
-                                    break
-
-                        if not sent and text:
-                            await client.send_message(chat['id'], text)
+                            await _send_with_fallback(chat['id'], text, photo_path=photo_path)
+                        else:
+                            if text:
+                                await client.send_message(chat['id'], text)
 
                     timeout = db.settings()[5]
                     await asyncio.sleep(timeout * 60)

@@ -465,14 +465,53 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
     elif data.startswith('EDIT_CHANNEL_POST:'):
         chat_id = int(data.split(':')[1])
         await state.set_data({'chat_id': chat_id})
+        post_data = db.get_channel_post(chat_id)
+        has_post = post_data and (post_data[0] or post_data[1] or post_data[2])
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text='👁 Посмотреть пост', callback_data=f'VIEW_CHANNEL_POST:{chat_id}')] if has_post else [],
             [InlineKeyboardButton(text='Текст', callback_data=f'CHANNEL_EDIT_TEXT:{chat_id}')],
             [InlineKeyboardButton(text='Фото', callback_data=f'CHANNEL_EDIT_PHOTO:{chat_id}'),
              InlineKeyboardButton(text='Видео', callback_data=f'CHANNEL_EDIT_VIDEO:{chat_id}')],
             [InlineKeyboardButton(text='Очистить пост', callback_data=f'CHANNEL_CLEAR:{chat_id}')],
             [InlineKeyboardButton(text='Назад', callback_data=f'EDIT_CHAT:{chat_id}')]
         ])
-        await c.message.edit_text(f'Редактирование поста чата {chat_id}:', reply_markup=keyboard)
+        # убираем пустые строки
+        keyboard.inline_keyboard = [row for row in keyboard.inline_keyboard if row]
+        status = '✅ Пост установлен' if has_post else '❌ Пост не установлен'
+        await c.message.edit_text(f'Пост чата {chat_id}\n{status}:', reply_markup=keyboard)
+
+    elif data.startswith('VIEW_CHANNEL_POST:'):
+        chat_id = int(data.split(':')[1])
+        post_data = db.get_channel_post(chat_id)
+        if not post_data or not (post_data[0] or post_data[1] or post_data[2]):
+            await c.answer('Пост не установлен', show_alert=True)
+            return
+        photo, video, text = post_data
+        text_html = markdown_to_html(text) if text else ''
+        try:
+            if photo:
+                photo_path = f'{config.DIR}{photo}' if config and config.DIR else photo
+                for ext in ['.jpg', '.jpeg', '.png', '.webp', '']:
+                    p = photo_path + ext if ext else photo_path
+                    if os.path.exists(p):
+                        await bot.send_photo(c.message.chat.id, p, caption=text_html or None)
+                        break
+                else:
+                    await bot.send_message(c.message.chat.id, f'Фото не найдено на диске.\n{text_html}')
+            elif video:
+                video_path = f'{config.DIR}{video}' if config and config.DIR else video
+                for ext in ['.mp4', '.mov', '.webm', '']:
+                    p = video_path + ext if ext else video_path
+                    if os.path.exists(p):
+                        await bot.send_video(c.message.chat.id, p, caption=text_html or None)
+                        break
+                else:
+                    await bot.send_message(c.message.chat.id, f'Видео не найдено на диске.\n{text_html}')
+            elif text_html:
+                await bot.send_message(c.message.chat.id, text_html)
+        except Exception as e:
+            await c.answer(f'Ошибка просмотра: {e}', show_alert=True)
+        await c.answer()
 
     elif data.startswith('CHANNEL_EDIT_TEXT:'):
         chat_id = int(data.split(':')[1])
