@@ -97,11 +97,64 @@ async def save_telegram_file(file_id: str, prefix: str, ext: str) -> str:
     return filename
 
 
+CAPTION_LIMIT = 950  # запас до лимита Telegram 1024
+TEXT_LIMIT = 4000  # запас до лимита 4096
+
+
+def split_html(text_html: str, limit: int = TEXT_LIMIT) -> list[str]:
+    """Нарезать длинный HTML на куски, по возможности по переносам строк."""
+    if len(text_html) <= limit:
+        return [text_html]
+    chunks, cur = [], ''
+    for line in text_html.split('\n'):
+        if len(cur) + len(line) + 1 > limit and cur:
+            chunks.append(cur)
+            cur = ''
+        cur = f'{cur}\n{line}' if cur else line
+    if cur:
+        chunks.append(cur)
+    return chunks or [text_html]
+
+
+async def send_post_preview(chat_id: int, media_path: str | None, text_html: str, is_video: bool = False):
+    """Предпросмотр поста: длинную подпись шлёт отдельным сообщением,
+    чтобы не упереться в лимит caption 1024."""
+    if media_path:
+        media = FSInputFile(media_path)
+        if text_html and len(text_html) > CAPTION_LIMIT:
+            if is_video:
+                await bot.send_video(chat_id, media)
+            else:
+                await bot.send_photo(chat_id, media)
+            for chunk in split_html(text_html):
+                await bot.send_message(chat_id, chunk, parse_mode=ParseMode.HTML)
+        elif is_video:
+            await bot.send_video(chat_id, media, caption=text_html or None, parse_mode=ParseMode.HTML)
+        else:
+            await bot.send_photo(chat_id, media, caption=text_html or None, parse_mode=ParseMode.HTML)
+    elif text_html:
+        for chunk in split_html(text_html):
+            await bot.send_message(chat_id, chunk, parse_mode=ParseMode.HTML)
+
+
+def _short(text: str, limit: int = 60) -> str:
+    text = (text or '').replace('\n', ' ').strip()
+    return text if len(text) <= limit else text[:limit - 1] + '…'
+
+
 def welcome_keyboard():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text='Запустить спам'), KeyboardButton(text='Пост')],
         [KeyboardButton(text='Настройки чатов'), KeyboardButton(text='Информация')],
         [KeyboardButton(text='Обновление')]
+    ], resize_keyboard=True)
+
+
+def spam_running_keyboard():
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text='Остановить спам')],
+        [KeyboardButton(text='Пост'), KeyboardButton(text='Настройки чатов')],
+        [KeyboardButton(text='Информация'), KeyboardButton(text='Вернуться')]
     ], resize_keyboard=True)
 
 
@@ -115,13 +168,50 @@ def channel_post_keyboard():
 def get_chat_settings_keyboard(chat_id):
     spam_status = db.get_channel_spam_status(chat_id)
     spam_text = '🛑 Остановить спам' if spam_status == 1 else '▶️ Включить спам'
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='Изменить задержку', callback_data=f'CHANGE_TIMEOUT:{chat_id}')],
-        [InlineKeyboardButton(text='Изменить пост', callback_data=f'EDIT_CHANNEL_POST:{chat_id}')],
-        [InlineKeyboardButton(text='Доп. текст', callback_data=f'ADD_ADDITIONAL:{chat_id}')],
+    rows = [
+        [InlineKeyboardButton(text='⏱ Изменить задержку', callback_data=f'CHANGE_TIMEOUT:{chat_id}')],
+        [InlineKeyboardButton(text='📝 Изменить пост', callback_data=f'EDIT_CHANNEL_POST:{chat_id}')],
+        [InlineKeyboardButton(text='💬 Доп. текст', callback_data=f'ADD_ADDITIONAL:{chat_id}')],
+    ]
+    try:
+        addit = db.get_additional_text(chat_id)
+        if addit and addit[0]:
+            rows.append([InlineKeyboardButton(text='🗑 Убрать доп. текст', callback_data=f'CLEAR_ADDITIONAL:{chat_id}')])
+    except Exception:
+        pass
+    rows += [
         [InlineKeyboardButton(text=spam_text, callback_data=f'TOGGLE_SPAM_SETTINGS:{chat_id}')],
-        [InlineKeyboardButton(text='Назад', callback_data='BACK_TO_CHATS')]
-    ])
+        [InlineKeyboardButton(text='⬅️ Назад', callback_data='BACK_TO_CHATS')]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def format_chat_info(chat_id: int) -> str:
+    """Красивая карточка чата для EDIT_CHAT / TOGGLE_SPAM_SETTINGS."""
+    spam_status = db.get_channel_spam_status(chat_id)
+    try:
+        addit = db.get_additional_text(chat_id)
+        addit_val = _short(addit[0], 80) if addit and addit[0] else '—'
+    except Exception:
+        addit_val = '—'
+    post_data = db.get_channel_post(chat_id)
+    if post_data and (post_data[0] or post_data[1] or post_data[2]):
+        parts = []
+        if post_data[0]:
+            parts.append('📷 фото')
+        if post_data[1]:
+            parts.append('📹 видео')
+        if post_data[2]:
+            parts.append(f'«{html.escape(_short(post_data[2], 50))}»')
+        post_desc = ' + '.join(parts)
+    else:
+        post_desc = '—'
+    timeout_val = db.get_channel_timeout(chat_id)
+    return (f'💬 <b>Чат {chat_id}</b>\n'
+            f'{"✅ Спам включён" if spam_status == 1 else "⬜ Спам выключен"}\n'
+            f'⏱ Интервал: {timeout_val} мин.\n'
+            f'💬 Доп. текст: {html.escape(addit_val)}\n'
+            f'📝 Пост: {post_desc}')
 
 
 async def get_chats_keyboard(page=0):
@@ -149,7 +239,7 @@ async def get_chats_keyboard(page=0):
         keyboard.append([
             InlineKeyboardButton(
                 text=f'{icon} {chat["title"]}',
-                callback_data=f'TOGGLE_SPAM:{chat["id"]}'
+                callback_data=f'TOGGLE_SPAM:{chat["id"]}:{page}'
             ),
             InlineKeyboardButton(text='⚙️', callback_data=f'EDIT_CHAT:{chat["id"]}')
         ])
@@ -214,6 +304,8 @@ class add_chat_state(StatesGroup):
 
 @router.message(Command("start"))
 async def process_start_command(m: Message):
+    if m.chat.type != 'private':
+        return  # в группах бот-панель молчит
     if m.chat.id in config.ADMINS:
         await bot.send_message(m.chat.id,
             f"<b>Добро пожаловать!</b>\n\nВерсия скрипта: {get_version()}\n\nВоспользуйтесь клавиатурой ниже для управления",
@@ -221,18 +313,54 @@ async def process_start_command(m: Message):
     else:
         await bot.send_message(m.chat.id, "Нет доступа")
 
+HELP_TEXT = (
+    "<b>Команды:</b>\n"
+    "/start — главное меню\n"
+    "/help — эта справка\n"
+    "/login — вход аккаунта рассылки (Pyrogram)\n"
+    "/update — проверить обновление\n"
+    "/cancel — выйти из текущего ввода\n\n"
+    "<b>Кнопки:</b>\n"
+    "• Запустить/Остановить спам\n"
+    "• Пост — глобальный пост для всех чатов\n"
+    "• Настройки чатов — вкл/выкл, интервал, свой пост и доп. текст\n"
+    "• Обновление — новая версия с GitHub"
+)
+
+@router.message(Command("help"))
+async def help_command(m: Message):
+    if m.chat.type != 'private':
+        return
+    if await _deny_if_not_admin(m):
+        return
+    await m.answer(HELP_TEXT, reply_markup=welcome_keyboard())
+
+@router.message(Command("cancel"))
+async def cancel_command(m: Message, state: FSMContext):
+    if await _deny_if_not_admin(m):
+        return
+    await state.clear()
+    await m.answer('Ввод отменён.', reply_markup=welcome_keyboard())
+
 async def _deny_if_not_admin(message: Message) -> bool:
-    """True если доступа нет (уже отправлен ответ)."""
-    if message.chat.id not in config.ADMINS and message.from_user.id not in config.ADMINS:
-        await message.answer("Нет доступа")
+    """True если доступа нет. В не-приватных чатах молча игнорируем,
+    чтобы бот не спамил 'Нет доступа' в группах."""
+    uid = message.from_user.id if message.from_user else 0
+    if message.chat.id in config.ADMINS or uid in config.ADMINS:
+        return False
+    if message.chat.type != 'private':
         return True
-    return False
+    await message.answer("Нет доступа")
+    return True
 
 
 async def _deny_callback_if_not_admin(c: CallbackQuery) -> bool:
     uid = c.from_user.id if c.from_user else 0
     if uid not in config.ADMINS and c.message.chat.id not in config.ADMINS:
-        await c.answer("Нет доступа", show_alert=True)
+        try:
+            await c.answer()
+        except Exception:
+            pass
         return True
     return False
 
@@ -279,24 +407,27 @@ async def post_settings(message: Message):
     photo = settings[1]
     video = settings[2]
     text = settings[3]
-    text_html = markdown_to_html(text) if text else ''
+    spam = settings[4]
+    timeout = settings[5]
     has_photo = bool(photo)
     has_video = bool(video)
 
-    lines = []
+    lines = ['<b>📝 Глобальный пост</b>']
     if has_photo:
-        lines.append('📷 Фото: установлено')
+        lines.append(f'📷 Фото: {html.escape(photo)}')
     if has_video:
-        lines.append('📹 Видео: установлено')
-    if text_html:
-        lines.append('📝 Текст: есть')
-    if not lines:
+        lines.append(f'📹 Видео: {html.escape(video)}')
+    if text:
+        lines.append(f'💬 Текст: «{html.escape(_short(text, 120))}»')
+    if not (has_photo or has_video or text):
         lines.append('❌ Пост пуст')
+    lines.append(f'⏱ Интервал по умолчанию: {timeout} мин.')
+    lines.append(f'{"✅ Спам запущен" if spam == 1 else "⬜ Спам остановлен"}')
 
     info = '\n'.join(lines)
 
     keyboard_rows = []
-    if has_photo or has_video or text_html:
+    if has_photo or has_video or text:
         keyboard_rows.append([InlineKeyboardButton(text='👁 Просмотреть пост', callback_data='VIEW_GLOBAL_POST')])
     keyboard_rows.append([InlineKeyboardButton(text='Изменить текст', callback_data='EDIT_TEXT')])
     keyboard_rows.append([
@@ -304,19 +435,21 @@ async def post_settings(message: Message):
         InlineKeyboardButton(text='Изменить видео', callback_data='EDIT_VIDEO')
     ])
     keyboard_rows.append([InlineKeyboardButton(text='Удалить медиа', callback_data='DEL_MEDIA')])
-    keyboard_rows.append([InlineKeyboardButton(text='Интервал по умолчанию', callback_data='INTERVAL')])
+    keyboard_rows.append([InlineKeyboardButton(text='⏱ Интервал по умолчанию', callback_data='INTERVAL')])
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
-    await message.answer(f'Глобальный пост:\n{info}', reply_markup=keyboard)
+    await message.answer(info, reply_markup=keyboard)
 
 @router.message(F.text == 'Запустить спам')
 async def start_spam_cmd(message: Message):
     if await _deny_if_not_admin(message):
         return
     db.setSpam(1)
-    await message.answer('Спам успешно запущен!', reply_markup=ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text='Остановить спам')]], resize_keyboard=True))
-    await start_spam_loop()
+    enabled = await start_spam_loop()
+    if enabled:
+        await message.answer(f'✅ Спам запущен! Активных чатов: {enabled}.',
+                             reply_markup=spam_running_keyboard())
+    # если чатов нет — start_spam_loop уже сообщил причину и выключил спам
 
 @router.message(F.text == 'Остановить спам')
 async def stop_spam_cmd(message: Message):
@@ -326,7 +459,7 @@ async def stop_spam_cmd(message: Message):
     db.setSpam(0)
     if spam_task and not spam_task.done():
         spam_task.cancel()
-    await message.answer('Останавливаю...', reply_markup=welcome_keyboard())
+    await message.answer('⏹ Спам остановлен.', reply_markup=welcome_keyboard())
 
 @router.message(F.text == 'Настройки чатов')
 async def chat_settings_menu(message: Message):
@@ -505,14 +638,16 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         await c.answer()
 
     elif data.startswith('TOGGLE_SPAM:'):
-        chat_id = int(data.split(':')[1])
+        parts = data.split(':')
+        chat_id = int(parts[1])
+        page = int(parts[2]) if len(parts) > 2 else 0
         current = db.get_channel_spam_status(chat_id)
         if current == 1:
             db.stop_spam_for_channel(chat_id)
         else:
             db.c.execute('UPDATE CHANNELS SET SPAM_ENABLED = 1 WHERE CHANNEL = ?', [str(chat_id)])
             db.conn.commit()
-        keyboard = await get_chats_keyboard(0)
+        keyboard = await get_chats_keyboard(page)
         try:
             await c.message.edit_reply_markup(reply_markup=keyboard)
         except Exception:
@@ -527,31 +662,16 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         else:
             db.c.execute('UPDATE CHANNELS SET SPAM_ENABLED = 1 WHERE CHANNEL = ?', [str(chat_id)])
             db.conn.commit()
-        addit = db.get_additional_text(chat_id)
-        addit_val = addit[0] if addit and addit[0] else 'не задан'
-        post_data = db.get_channel_post(chat_id)
-        has_post = post_data and (post_data[0] or post_data[1] or post_data[2])
-        timeout_val = db.get_channel_timeout(chat_id)
-        info = (f'Чат: {chat_id}\nДоп. текст: {addit_val}\n'
-                f'Интервал: {timeout_val} мин.\n'
-                f'Индив. пост: {"есть" if has_post else "нет"}')
-        await c.message.edit_text(info, reply_markup=get_chat_settings_keyboard(chat_id))
+        await c.message.edit_text(format_chat_info(chat_id),
+                                  reply_markup=get_chat_settings_keyboard(chat_id),
+                                  parse_mode=ParseMode.HTML)
         await c.answer()
 
     elif data.startswith('EDIT_CHAT:'):
         chat_id = int(data.split(':')[1])
-        addit = db.get_additional_text(chat_id)
-        addit_val = addit[0] if addit and addit[0] else 'не задан'
-        post_data = db.get_channel_post(chat_id)
-        has_post = post_data and (post_data[0] or post_data[1] or post_data[2])
-        spam_status = db.get_channel_spam_status(chat_id)
-        timeout_val = db.get_channel_timeout(chat_id)
-        info = (f'Чат: {chat_id}\n'
-                f'Спам: {"✅ включен" if spam_status == 1 else "⬜ выключен"}\n'
-                f'Интервал: {timeout_val} мин.\n'
-                f'Доп. текст: {addit_val}\n'
-                f'Индив. пост: {"есть" if has_post else "нет"}')
-        await c.message.edit_text(info, reply_markup=get_chat_settings_keyboard(chat_id))
+        await c.message.edit_text(format_chat_info(chat_id),
+                                  reply_markup=get_chat_settings_keyboard(chat_id),
+                                  parse_mode=ParseMode.HTML)
         await c.answer()
 
     elif data == 'ADD_CHAT':
@@ -650,6 +770,14 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         await state.set_state(addition.id)
         await c.answer()
 
+    elif data.startswith('CLEAR_ADDITIONAL:'):
+        chat_id = int(data.split(':')[1])
+        db.add_additional_text(chat_id, '')
+        await c.message.edit_text(format_chat_info(chat_id),
+                                  reply_markup=get_chat_settings_keyboard(chat_id),
+                                  parse_mode=ParseMode.HTML)
+        await c.answer('Доп. текст убран')
+
     elif data.startswith('EDIT_CHANNEL_POST:'):
         chat_id = int(data.split(':')[1])
         await state.set_data({'chat_id': chat_id})
@@ -681,19 +809,18 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
             if photo:
                 found = resolve_media_path(photo)
                 if found:
-                    await bot.send_photo(c.message.chat.id, FSInputFile(found),
-                                         caption=text_html or None, parse_mode=ParseMode.HTML)
+                    await send_post_preview(c.message.chat.id, found, text_html)
                 else:
                     await bot.send_message(c.message.chat.id, f'Фото не найдено на диске.\n{text_html}', parse_mode=ParseMode.HTML)
             elif video:
                 found = resolve_media_path(video)
                 if found:
-                    await bot.send_video(c.message.chat.id, FSInputFile(found),
-                                         caption=text_html or None, parse_mode=ParseMode.HTML)
+                    await send_post_preview(c.message.chat.id, found, text_html, is_video=True)
                 else:
                     await bot.send_message(c.message.chat.id, f'Видео не найдено на диске.\n{text_html}', parse_mode=ParseMode.HTML)
             elif text_html:
-                await bot.send_message(c.message.chat.id, text_html, parse_mode=ParseMode.HTML)
+                for chunk in split_html(text_html):
+                    await bot.send_message(c.message.chat.id, chunk, parse_mode=ParseMode.HTML)
         except Exception as e:
             await c.answer(f'Ошибка просмотра: {e}', show_alert=True)
             return
@@ -742,19 +869,18 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
             if photo:
                 found = resolve_media_path(photo)
                 if found:
-                    await bot.send_photo(c.message.chat.id, FSInputFile(found),
-                                         caption=text_html or None, parse_mode=ParseMode.HTML)
+                    await send_post_preview(c.message.chat.id, found, text_html)
                 else:
                     await bot.send_message(c.message.chat.id, f'Файл не найден.\n{text_html}', parse_mode=ParseMode.HTML)
             elif video:
                 found = resolve_media_path(video)
                 if found:
-                    await bot.send_video(c.message.chat.id, FSInputFile(found),
-                                         caption=text_html or None, parse_mode=ParseMode.HTML)
+                    await send_post_preview(c.message.chat.id, found, text_html, is_video=True)
                 else:
                     await bot.send_message(c.message.chat.id, f'Файл не найден.\n{text_html}', parse_mode=ParseMode.HTML)
             elif text_html:
-                await bot.send_message(c.message.chat.id, text_html, parse_mode=ParseMode.HTML)
+                for chunk in split_html(text_html):
+                    await bot.send_message(c.message.chat.id, chunk, parse_mode=ParseMode.HTML)
             else:
                 await c.answer('Пост пуст', show_alert=True)
                 return
@@ -1097,7 +1223,8 @@ async def handle_phone_input(m: Message, state: FSMContext):
         await m.answer('Отправляю код...')
         result = await user.do_login(phone)
         if result is None:
-            await m.answer('Ошибка отправки кода. Проверьте номер телефона.')
+            detail = getattr(user, 'login_error', None) or 'Проверьте номер телефона.'
+            await m.answer(f'Ошибка отправки кода. {detail}')
             await state.clear()
             return
 
@@ -1152,8 +1279,15 @@ async def handle_code_text(m: Message, state: FSMContext):
 
 
 @router.message(F.text)
-async def echo_message(m: Message):
-    pass
+async def echo_message(m: Message, state: FSMContext):
+    if m.chat.type != 'private':
+        return
+    uid = m.from_user.id if m.from_user else 0
+    if m.chat.id not in config.ADMINS and uid not in config.ADMINS:
+        return
+    if await state.get_state() is not None:
+        return  # идёт ввод — молчим, ждём данные
+    await m.answer('Неизвестная команда. /help — список команд.', reply_markup=welcome_keyboard())
 
 
 async def do_login(chat_id):
@@ -1180,11 +1314,12 @@ async def do_update_menu(chat_id):
         await bot.send_message(chat_id, f"Актуальная версия: {check['current']}")
 
 
-async def start_spam_loop():
+async def start_spam_loop() -> int:
+    """Запустить спам-цикл. Возвращает число активных чатов (0 если не запущен)."""
     global spam_task
     settings = db.settings()
     if settings[4] != 1:
-        return
+        return 0
     # Не плодим дубликаты: отменяем предыдущий цикл
     if spam_task and not spam_task.done():
         spam_task.cancel()
@@ -1195,15 +1330,19 @@ async def start_spam_loop():
     if not await user.ensure_connected():
         await bot.send_message(config.ADMINS[0], 'Pyrogram не подключен. Используй /login')
         db.setSpam(0)
-        return
+        return 0
     chats = await user.get_chats()
     # Фильтруем только включённые в БД
     enabled = [ch for ch in chats if db.get_channel_spam_status(ch['id']) == 1]
     if not enabled:
-        await bot.send_message(config.ADMINS[0], 'Нет включённых чатов для рассылки. Включите их в «Настройки чатов».')
-        return
+        db.setSpam(0)
+        await bot.send_message(config.ADMINS[0],
+                               'Нет включённых чатов для рассылки. Включите их в «Настройки чатов».',
+                               reply_markup=welcome_keyboard())
+        return 0
 
     spam_task = asyncio.create_task(user.spamming(enabled, db.settings(), db))
+    return len(enabled)
 
 
 async def main():

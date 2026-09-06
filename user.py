@@ -22,6 +22,7 @@ bot_instance = None
 
 login_phone = None
 login_password = None
+login_error: Optional[str] = None
 current_code = {}
 code_messages = {}
 phone_code_hash = None
@@ -104,7 +105,8 @@ async def get_chats() -> List[Dict[str, Any]]:
     chat_list = []
     try:
         async for dialog in client.get_dialogs():
-            if dialog.chat.type in (enums.ChatType.SUPERGROUP, enums.ChatType.CHANNEL):
+            if dialog.chat.type in (enums.ChatType.SUPERGROUP, enums.ChatType.CHANNEL,
+                                    enums.ChatType.GROUP):
                 chat_list.append({
                     'title': dialog.chat.title,
                     'id': dialog.chat.id
@@ -132,20 +134,32 @@ async def leave_from_channel(channel_id: int) -> bool:
 
 
 async def do_login(phone: str) -> Optional[str]:
-    global phone_code_hash, client
+    global phone_code_hash, client, login_error
+    login_error = None
     await _delete_session()
     client = make_client()
     try:
         await client.connect()
     except Exception as e:
         logger.error(f"Ошибка подключения для отправки кода: {e}")
+        login_error = str(e)
         return None
     try:
         sent = await client.send_code(phone)
         phone_code_hash = sent.phone_code_hash
         return sent.phone_code_hash
+    except FloodWait as e:
+        wait = int(getattr(e, 'value', 0) or 0)
+        logger.error(f"FloodWait при отправке кода: {wait}s")
+        login_error = f"Telegram просит подождать {wait} сек. Попробуйте позже."
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        return None
     except Exception as e:
         logger.error(f"Ошибка отправки кода: {e}")
+        login_error = str(e)
         try:
             await client.disconnect()
         except Exception:

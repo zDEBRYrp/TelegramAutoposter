@@ -6,12 +6,6 @@ from typing import Optional, Tuple, Any
 
 logger = logging.getLogger(__name__)
 
-try:
-    import markdown2
-    HAS_MARKDOWN = True
-except ImportError:
-    HAS_MARKDOWN = False
-
 
 def markdown_to_html(text: str) -> str:
     """Конвертирует Markdown в HTML для Telegram.
