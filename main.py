@@ -142,35 +142,54 @@ def _short(text: str, limit: int = 60) -> str:
     return text if len(text) <= limit else text[:limit - 1] + '…'
 
 
+# --- Подписи reply-кнопок (единый источник правды: меню и хендлеры используют их) ---
+BTN_START = '▶️ Запустить рассылку'
+BTN_STOP = '⏹ Остановить рассылку'
+BTN_POST = '📝 Общий пост'
+BTN_CHATS = '💬 Чаты'
+BTN_CPOSTS = '📢 Посты чатов'
+BTN_INFO = 'ℹ️ Инфо'
+BTN_UPDATE = '🔄 Обновление'
+BTN_HOME = '🏠 Главное меню'
+BTN_CLIST = '📋 Список постов'
+BTN_CADD = '➕ Новый пост'
+
+
 def welcome_keyboard():
     return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text='Запустить спам'), KeyboardButton(text='Пост')],
-        [KeyboardButton(text='Настройки чатов'), KeyboardButton(text='Информация')],
-        [KeyboardButton(text='Обновление')]
+        [KeyboardButton(text=BTN_START)],
+        [KeyboardButton(text=BTN_POST), KeyboardButton(text=BTN_CHATS)],
+        [KeyboardButton(text=BTN_CPOSTS), KeyboardButton(text=BTN_INFO)],
+        [KeyboardButton(text=BTN_UPDATE)]
     ], resize_keyboard=True)
 
 
 def spam_running_keyboard():
     return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text='Остановить спам')],
-        [KeyboardButton(text='Пост'), KeyboardButton(text='Настройки чатов')],
-        [KeyboardButton(text='Информация'), KeyboardButton(text='Вернуться')]
+        [KeyboardButton(text=BTN_STOP)],
+        [KeyboardButton(text=BTN_POST), KeyboardButton(text=BTN_CHATS)],
+        [KeyboardButton(text=BTN_CPOSTS), KeyboardButton(text=BTN_INFO)]
     ], resize_keyboard=True)
 
 
 def channel_post_keyboard():
     return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text='Список канальных постов'), KeyboardButton(text='Добавить канальный пост')],
-        [KeyboardButton(text='Вернуться')]
+        [KeyboardButton(text=BTN_CLIST), KeyboardButton(text=BTN_CADD)],
+        [KeyboardButton(text=BTN_HOME)]
     ], resize_keyboard=True)
 
 
 def get_chat_settings_keyboard(chat_id):
     spam_status = db.get_channel_spam_status(chat_id)
-    spam_text = '🛑 Остановить спам' if spam_status == 1 else '▶️ Включить спам'
+    spam_text = '✅ Рассылка ВКЛ — выключить' if spam_status == 1 else '⬜ Рассылка ВЫКЛ — включить'
+    try:
+        timeout_val = db.get_channel_timeout(chat_id)
+    except Exception:
+        timeout_val = None
     rows = [
-        [InlineKeyboardButton(text='⏱ Изменить задержку', callback_data=f'CHANGE_TIMEOUT:{chat_id}')],
-        [InlineKeyboardButton(text='📝 Изменить пост', callback_data=f'EDIT_CHANNEL_POST:{chat_id}')],
+        [InlineKeyboardButton(text=spam_text, callback_data=f'TOGGLE_SPAM_SETTINGS:{chat_id}')],
+        [InlineKeyboardButton(text='📝 Пост чата', callback_data=f'EDIT_CHANNEL_POST:{chat_id}')],
+        [InlineKeyboardButton(text=f'⏱ Интервал: {timeout_val} мин.', callback_data=f'CHANGE_TIMEOUT:{chat_id}')],
         [InlineKeyboardButton(text='💬 Доп. текст', callback_data=f'ADD_ADDITIONAL:{chat_id}')],
     ]
     try:
@@ -179,10 +198,7 @@ def get_chat_settings_keyboard(chat_id):
             rows.append([InlineKeyboardButton(text='🗑 Убрать доп. текст', callback_data=f'CLEAR_ADDITIONAL:{chat_id}')])
     except Exception:
         pass
-    rows += [
-        [InlineKeyboardButton(text=spam_text, callback_data=f'TOGGLE_SPAM_SETTINGS:{chat_id}')],
-        [InlineKeyboardButton(text='⬅️ Назад', callback_data='BACK_TO_CHATS')]
-    ]
+    rows.append([InlineKeyboardButton(text='⬅️ К чатам', callback_data='BACK_TO_CHATS')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -208,7 +224,7 @@ def format_chat_info(chat_id: int) -> str:
         post_desc = '—'
     timeout_val = db.get_channel_timeout(chat_id)
     return (f'💬 <b>Чат {chat_id}</b>\n'
-            f'{"✅ Спам включён" if spam_status == 1 else "⬜ Спам выключен"}\n'
+            f'{"✅ Рассылка включена" if spam_status == 1 else "⬜ Рассылка выключена"}\n'
             f'⏱ Интервал: {timeout_val} мин.\n'
             f'💬 Доп. текст: {html.escape(addit_val)}\n'
             f'📝 Пост: {post_desc}')
@@ -314,17 +330,13 @@ async def process_start_command(m: Message):
         await bot.send_message(m.chat.id, "Нет доступа")
 
 HELP_TEXT = (
-    "<b>Команды:</b>\n"
-    "/start — главное меню\n"
-    "/help — эта справка\n"
-    "/login — вход аккаунта рассылки (Pyrogram)\n"
-    "/update — проверить обновление\n"
-    "/cancel — выйти из текущего ввода\n\n"
-    "<b>Кнопки:</b>\n"
-    "• Запустить/Остановить спам\n"
-    "• Пост — глобальный пост для всех чатов\n"
-    "• Настройки чатов — вкл/выкл, интервал, свой пост и доп. текст\n"
-    "• Обновление — новая версия с GitHub"
+    "<b>Что умеет бот:</b>\n"
+    "• ▶️ Запустить рассылку — постить во все включённые чаты\n"
+    "• 📝 Общий пост — текст + фото/видео для всех чатов\n"
+    "• 💬 Чаты — вкл/выкл, свой интервал, свой пост и доп. текст\n"
+    "• 📢 Посты чатов — у кого задан свой пост\n"
+    "• 🔄 Обновление — новая версия с GitHub\n\n"
+    "<b>Команды:</b> /start /help /login /update /cancel"
 )
 
 @router.message(Command("help"))
@@ -377,28 +389,39 @@ async def update_command(m: Message):
         return
     await do_update_menu(m.chat.id)
 
-@router.message(F.text == 'Информация')
+@router.message(F.text == BTN_INFO)
 async def send_info(message: Message):
     if await _deny_if_not_admin(message):
         return
     version = get_version()
     latest = updater.get_latest_version()
-    status = f"Доступна версия {latest}" if latest and version != latest else "Актуально"
-    await message.answer(f"Version: {version}\nStatus: {status}\n\nSupport: @support")
+    upd = '✅ актуально' if not latest or version == latest else f'🔄 доступна {latest}'
+    settings = db.settings()
+    spam = settings[4] if settings else 0
+    try:
+        all_chats = db.c.execute('SELECT COUNT(*), COALESCE(SUM(SPAM_ENABLED), 0) FROM CHANNELS').fetchone()
+        total, active = (all_chats[0] or 0), (all_chats[1] or 0)
+    except Exception:
+        total, active = 0, 0
+    await message.answer(
+        f'ℹ️ <b>Autoposter {version}</b>\n'
+        f'Обновление: {upd}\n'
+        f'📝 Рассылка: {"✅ запущена" if spam == 1 else "⬜ остановлена"}\n'
+        f'💬 Чаты: {active} активно из {total}\n\nSupport: @support')
 
-@router.message(F.text == 'Обновление')
+@router.message(F.text == BTN_UPDATE)
 async def update_btn(message: Message):
     if await _deny_if_not_admin(message):
         return
     await do_update_menu(message.chat.id)
 
-@router.message(F.text == 'Вернуться')
+@router.message(F.text == BTN_HOME)
 async def return_menu(message: Message):
     if await _deny_if_not_admin(message):
         return
-    await message.answer('Главное меню:', reply_markup=welcome_keyboard())
+    await message.answer('🏠 Главное меню:', reply_markup=welcome_keyboard())
 
-@router.message(F.text == 'Пост')
+@router.message(F.text == BTN_POST)
 async def post_settings(message: Message):
     if await _deny_if_not_admin(message):
         return
@@ -422,36 +445,38 @@ async def post_settings(message: Message):
     if not (has_photo or has_video or text):
         lines.append('❌ Пост пуст')
     lines.append(f'⏱ Интервал по умолчанию: {timeout} мин.')
-    lines.append(f'{"✅ Спам запущен" if spam == 1 else "⬜ Спам остановлен"}')
+    lines.append(f'{"✅ Рассылка запущена" if spam == 1 else "⬜ Рассылка остановлена"}')
 
     info = '\n'.join(lines)
 
     keyboard_rows = []
     if has_photo or has_video or text:
         keyboard_rows.append([InlineKeyboardButton(text='👁 Просмотреть пост', callback_data='VIEW_GLOBAL_POST')])
-    keyboard_rows.append([InlineKeyboardButton(text='Изменить текст', callback_data='EDIT_TEXT')])
+    keyboard_rows.append([InlineKeyboardButton(
+        text=f'📝 Текст {"✅" if text else ""}', callback_data='EDIT_TEXT')])
     keyboard_rows.append([
-        InlineKeyboardButton(text='Изменить фото', callback_data='EDIT_PHOTO'),
-        InlineKeyboardButton(text='Изменить видео', callback_data='EDIT_VIDEO')
+        InlineKeyboardButton(text=f'📷 Фото {"✅" if has_photo else ""}', callback_data='EDIT_PHOTO'),
+        InlineKeyboardButton(text=f'📹 Видео {"✅" if has_video else ""}', callback_data='EDIT_VIDEO')
     ])
-    keyboard_rows.append([InlineKeyboardButton(text='Удалить медиа', callback_data='DEL_MEDIA')])
-    keyboard_rows.append([InlineKeyboardButton(text='⏱ Интервал по умолчанию', callback_data='INTERVAL')])
+    if has_photo or has_video:
+        keyboard_rows.append([InlineKeyboardButton(text='🗑 Убрать фото/видео', callback_data='DEL_MEDIA')])
+    keyboard_rows.append([InlineKeyboardButton(text=f'⏱ Интервал: {timeout} мин.', callback_data='INTERVAL')])
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
     await message.answer(info, reply_markup=keyboard)
 
-@router.message(F.text == 'Запустить спам')
+@router.message(F.text == BTN_START)
 async def start_spam_cmd(message: Message):
     if await _deny_if_not_admin(message):
         return
     db.setSpam(1)
     enabled = await start_spam_loop()
     if enabled:
-        await message.answer(f'✅ Спам запущен! Активных чатов: {enabled}.',
+        await message.answer(f'✅ Рассылка запущена! Активных чатов: {enabled}.',
                              reply_markup=spam_running_keyboard())
     # если чатов нет — start_spam_loop уже сообщил причину и выключил спам
 
-@router.message(F.text == 'Остановить спам')
+@router.message(F.text == BTN_STOP)
 async def stop_spam_cmd(message: Message):
     if await _deny_if_not_admin(message):
         return
@@ -459,60 +484,39 @@ async def stop_spam_cmd(message: Message):
     db.setSpam(0)
     if spam_task and not spam_task.done():
         spam_task.cancel()
-    await message.answer('⏹ Спам остановлен.', reply_markup=welcome_keyboard())
+    await message.answer('⏹ Рассылка остановлена.', reply_markup=welcome_keyboard())
 
-@router.message(F.text == 'Настройки чатов')
+@router.message(F.text == BTN_CHATS)
 async def chat_settings_menu(message: Message):
     if await _deny_if_not_admin(message):
         return
+    try:
+        all_chats = db.c.execute('SELECT COUNT(*), COALESCE(SUM(SPAM_ENABLED), 0) FROM CHANNELS').fetchone()
+        total, active = (all_chats[0] or 0), (all_chats[1] or 0)
+    except Exception:
+        total, active = 0, 0
     keyboard = await get_chats_keyboard(0)
-    await message.answer('Доступные чаты:', reply_markup=keyboard)
+    await message.answer(f'💬 <b>Чаты</b> — активно {active} из {total}\n'
+                         f'Нажми на чат чтобы вкл/выкл, ⚙️ — настройки',
+                         reply_markup=keyboard)
 
-@router.message(F.text == 'Канальные посты')
+@router.message(F.text == BTN_CPOSTS)
 async def channel_posts_menu(message: Message):
     if await _deny_if_not_admin(message):
         return
-    await message.answer('Управление канальными постами:', reply_markup=channel_post_keyboard())
+    await message.answer('📢 <b>Посты чатов</b> — свой текст/медиа для отдельных чатов.\n'
+                         'Либо: 💬 Чаты → ⚙️ → 📝 Пост чата.',
+                         reply_markup=channel_post_keyboard())
 
-@router.message(F.text == 'Добавить канальный пост')
+@router.message(F.text == BTN_CADD)
 async def add_channel_post_hint(message: Message):
     if await _deny_if_not_admin(message):
         return
     await message.answer(
         'Индивидуальный пост задаётся для конкретного чата:\n'
-        'Настройки чатов → ⚙️ → Изменить пост → Текст/Фото/Видео.')
+        '💬 Чаты → ⚙️ → 📝 Пост чата → Текст/Фото/Видео.')
 
-# Reply-кнопки старого меню поста (на случай ручного ввода текста)
-@router.message(F.text.in_({'Изменить текст'}))
-async def reply_edit_text(message: Message, state: FSMContext):
-    if await _deny_if_not_admin(message):
-        return
-    await message.answer('Введите текст глобального поста:')
-    await state.set_state(post.text)
-
-@router.message(F.text.in_({'Изменить фото'}))
-async def reply_edit_photo(message: Message, state: FSMContext):
-    if await _deny_if_not_admin(message):
-        return
-    await message.answer('Отправь фото для глобального поста:')
-    await state.set_state(global_post_photo.photo)
-
-@router.message(F.text.in_({'Изменить видео'}))
-async def reply_edit_video(message: Message, state: FSMContext):
-    if await _deny_if_not_admin(message):
-        return
-    await message.answer('Отправь видео для глобального поста:')
-    await state.set_state(global_post_video.video)
-
-@router.message(F.text.in_({'Удалить медиа'}))
-async def reply_del_media(message: Message):
-    if await _deny_if_not_admin(message):
-        return
-    db.change_photo('')
-    db.change_video('')
-    await message.answer('Медиа удалено.')
-
-@router.message(F.text == 'Список канальных постов')
+@router.message(F.text == BTN_CLIST)
 async def list_channel_posts(message: Message):
     if await _deny_if_not_admin(message):
         return
@@ -520,11 +524,11 @@ async def list_channel_posts(message: Message):
         db.c.execute('SELECT CHANNEL, POST_PHOTO, POST_VIDEO, POST_TEXT FROM CHANNELS WHERE COALESCE(POST_PHOTO, "") != "" OR COALESCE(POST_VIDEO, "") != "" OR COALESCE(POST_TEXT, "") != ""')
         posts = db.c.fetchall()
         if posts:
-            text = 'Канальные посты:\n' + '\n'.join(
-                f'• Чат {p[0]}: {"📷" if p[1] else ""} {"📹" if p[2] else ""} {"📝" if p[3] else ""}' for p in posts)
+            text = '📋 <b>Посты чатов:</b>\n' + '\n'.join(
+                f'• Чат {p[0]}: {"📷" if p[1] else ""}{"📹" if p[2] else ""}{"📝" if p[3] else ""}' for p in posts)
             await message.answer(text)
         else:
-            await message.answer('Канальных постов нет.')
+            await message.answer('Постов чатов пока нет. Нажми «➕ Новый пост» — подскажу где создать.')
     except Exception as e:
         await message.answer(f'Ошибка: {e}')
 
@@ -644,15 +648,17 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         current = db.get_channel_spam_status(chat_id)
         if current == 1:
             db.stop_spam_for_channel(chat_id)
+            toast = '⬜ Рассылка выключена'
         else:
             db.c.execute('UPDATE CHANNELS SET SPAM_ENABLED = 1 WHERE CHANNEL = ?', [str(chat_id)])
             db.conn.commit()
+            toast = '✅ Рассылка включена'
         keyboard = await get_chats_keyboard(page)
         try:
             await c.message.edit_reply_markup(reply_markup=keyboard)
         except Exception:
             pass
-        await c.answer('Обновлено')
+        await c.answer(toast)
 
     elif data.startswith('TOGGLE_SPAM_SETTINGS:'):
         chat_id = int(data.split(':')[1])
@@ -680,7 +686,7 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text='📛 По username (@channel)', callback_data='INPUT_CHAT_USERNAME')],
             [InlineKeyboardButton(text='🔗 По ссылке (t.me/...)', callback_data='INPUT_CHAT_LINK')],
             [InlineKeyboardButton(text='📋 Из моих диалогов', callback_data='INPUT_CHAT_DIALOGS')],
-            [InlineKeyboardButton(text='Назад', callback_data='BACK_TO_CHATS')]
+            [InlineKeyboardButton(text='⬅️ Назад', callback_data='BACK_TO_CHATS')]
         ])
         await c.message.edit_text('Выберите способ добавления чата:', reply_markup=keyboard)
         await c.answer()
@@ -734,7 +740,7 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
             if page < total_pages - 1:
                 nav.append(InlineKeyboardButton(text='➡️', callback_data=f'DIALOGS_PAGE:{page+1}'))
             rows.append(nav)
-        rows.append([InlineKeyboardButton(text='Назад', callback_data='ADD_CHAT')])
+        rows.append([InlineKeyboardButton(text='⬅️ Назад', callback_data='ADD_CHAT')])
         await c.message.edit_text('Выберите чат для добавления:', reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
         await c.answer()
 
@@ -750,7 +756,14 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
     elif data == 'BACK_TO_CHATS':
         keyboard = await get_chats_keyboard(0)
         try:
-            await c.message.edit_text('Доступные чаты:', reply_markup=keyboard)
+            all_chats = db.c.execute('SELECT COUNT(*), COALESCE(SUM(SPAM_ENABLED), 0) FROM CHANNELS').fetchone()
+            total, active = (all_chats[0] or 0), (all_chats[1] or 0)
+        except Exception:
+            total, active = 0, 0
+        header = (f'💬 <b>Чаты</b> — активно {active} из {total}\n'
+                  f'Нажми на чат чтобы вкл/выкл, ⚙️ — настройки')
+        try:
+            await c.message.edit_text(header, reply_markup=keyboard, parse_mode=ParseMode.HTML)
         except Exception:
             await c.message.edit_reply_markup(reply_markup=keyboard)
         await c.answer()
@@ -782,19 +795,22 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         chat_id = int(data.split(':')[1])
         await state.set_data({'chat_id': chat_id})
         post_data = db.get_channel_post(chat_id)
-        has_post = post_data and (post_data[0] or post_data[1] or post_data[2])
+        has_photo = bool(post_data and post_data[0])
+        has_video = bool(post_data and post_data[1])
+        has_text = bool(post_data and post_data[2])
+        has_post = has_photo or has_video or has_text
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text='👁 Посмотреть пост', callback_data=f'VIEW_CHANNEL_POST:{chat_id}')] if has_post else [],
-            [InlineKeyboardButton(text='Текст', callback_data=f'CHANNEL_EDIT_TEXT:{chat_id}')],
-            [InlineKeyboardButton(text='Фото', callback_data=f'CHANNEL_EDIT_PHOTO:{chat_id}'),
-             InlineKeyboardButton(text='Видео', callback_data=f'CHANNEL_EDIT_VIDEO:{chat_id}')],
-            [InlineKeyboardButton(text='Очистить пост', callback_data=f'CHANNEL_CLEAR:{chat_id}')],
-            [InlineKeyboardButton(text='Назад', callback_data=f'EDIT_CHAT:{chat_id}')]
+            [InlineKeyboardButton(text=f'📝 Текст {"✅" if has_text else ""}', callback_data=f'CHANNEL_EDIT_TEXT:{chat_id}')],
+            [InlineKeyboardButton(text=f'📷 Фото {"✅" if has_photo else ""}', callback_data=f'CHANNEL_EDIT_PHOTO:{chat_id}'),
+             InlineKeyboardButton(text=f'📹 Видео {"✅" if has_video else ""}', callback_data=f'CHANNEL_EDIT_VIDEO:{chat_id}')],
+            [InlineKeyboardButton(text='🗑 Очистить пост', callback_data=f'CHANNEL_CLEAR:{chat_id}')] if has_post else [],
+            [InlineKeyboardButton(text='⬅️ К чату', callback_data=f'EDIT_CHAT:{chat_id}')]
         ])
         # убираем пустые строки
         keyboard.inline_keyboard = [row for row in keyboard.inline_keyboard if row]
         status = '✅ Пост установлен' if has_post else '❌ Пост не установлен'
-        await c.message.edit_text(f'Пост чата {chat_id}\n{status}:', reply_markup=keyboard)
+        await c.message.edit_text(f'📝 Пост чата {chat_id}\n{status}:', reply_markup=keyboard)
         await c.answer()
 
     elif data.startswith('VIEW_CHANNEL_POST:'):
@@ -902,7 +918,7 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
     elif data == 'DEL_MEDIA':
         db.change_photo('')
         db.change_video('')
-        await c.message.edit_text('Медиа удалено.')
+        await c.message.edit_text('🗑 Фото/видео убрано.')
         await c.answer()
 
     elif data == 'INTERVAL':
@@ -1337,7 +1353,7 @@ async def start_spam_loop() -> int:
     if not enabled:
         db.setSpam(0)
         await bot.send_message(config.ADMINS[0],
-                               'Нет включённых чатов для рассылки. Включите их в «Настройки чатов».',
+                               'Нет включённых чатов для рассылки. Включи их в «💬 Чаты».',
                                reply_markup=welcome_keyboard())
         return 0
 
