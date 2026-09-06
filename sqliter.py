@@ -63,8 +63,11 @@ def markdown_to_html(text: str) -> str:
 
 
 class DBConnection(object):
-    def __init__(self):
-        self.db_path = f'{config.DIR}database.db' if hasattr(config, 'DIR') else 'database.db'
+    def __init__(self, db_path: Optional[str] = None):
+        if db_path:
+            self.db_path = db_path
+        else:
+            self.db_path = f'{config.DIR}database.db' if getattr(config, 'DIR', '') else 'database.db'
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.c = self.conn.cursor()
         self.init_db()

@@ -6,7 +6,7 @@ import shutil
 
 logger = logging.getLogger(__name__)
 
-REPO = "zdebryrp/TelegramAutoposter"
+REPO = "zDEBRYrp/TelegramAutoposter"
 BRANCH = "main"
 VERSION_URL = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/version.txt"
 # Файлы, которые обновляем с GitHub (раньше обновлялся только main.py,

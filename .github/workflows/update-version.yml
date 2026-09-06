@@ -1,31 +1,38 @@
-name: Update Version
+name: Tests
 
 on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
 
 jobs:
-  update-version:
+  tests:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Read version from README.md
-        id: version
-        run: |
-          VERSION=$(grep -oP 'Version:\s*\K\d+\.\d+\.\d+' README.md)
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-      - name: Create version.txt
+      - name: Install dependencies
         run: |
-          echo "${{ steps.version.outputs.VERSION }}" > version.txt
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Commit version.txt
+      - name: Compile check
         run: |
-          git config --global user.name 'GitHub Actions'
-          git config --global user.email 'actions@github.com'
-          git add version.txt
-          git commit -m 'Update version' || echo "No changes"
-          git push
+          python -m py_compile main.py user.py sqliter.py config.py updater.py login.py bump_version.py
+
+      - name: Run pytest
+        env:
+          TOKEN: "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+          API_ID: "12345"
+          API_HASH: dummy-hash-for-tests
+        run: |
+          python -m pytest tests/ -q

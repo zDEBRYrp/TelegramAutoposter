@@ -105,14 +105,6 @@ def welcome_keyboard():
     ], resize_keyboard=True)
 
 
-def post_settings_keyboard():
-    return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text='Изменить текст'), KeyboardButton(text='Изменить фото')],
-        [KeyboardButton(text='Изменить видео'), KeyboardButton(text='Удалить медиа')],
-        [KeyboardButton(text='Канальные посты'), KeyboardButton(text='Вернуться')]
-    ], resize_keyboard=True)
-
-
 def channel_post_keyboard():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text='Список канальных постов'), KeyboardButton(text='Добавить канальный пост')],
@@ -185,9 +177,6 @@ class login_code(StatesGroup):
 class login_password(StatesGroup):
     password = State()
 
-class update_state(StatesGroup):
-    confirm = State()
-
 class addition(StatesGroup):
     id = State()
 
@@ -215,7 +204,6 @@ class time(StatesGroup):
     timeout = State()
 
 class channel_time(StatesGroup):
-    id = State()
     timeout = State()
 
 class add_chat_state(StatesGroup):
@@ -361,7 +349,7 @@ async def add_channel_post_hint(message: Message):
         'Индивидуальный пост задаётся для конкретного чата:\n'
         'Настройки чатов → ⚙️ → Изменить пост → Текст/Фото/Видео.')
 
-# Reply-кнопки из старого post_settings_keyboard (на случай ручного ввода)
+# Reply-кнопки старого меню поста (на случай ручного ввода текста)
 @router.message(F.text.in_({'Изменить текст'}))
 async def reply_edit_text(message: Message, state: FSMContext):
     if await _deny_if_not_admin(message):
@@ -396,7 +384,7 @@ async def list_channel_posts(message: Message):
     if await _deny_if_not_admin(message):
         return
     try:
-        db.c.execute('SELECT CHANNEL, POST_PHOTO, POST_VIDEO, POST_TEXT FROM CHANNELS WHERE POST_PHOTO != "" OR POST_VIDEO != "" OR POST_TEXT != ""')
+        db.c.execute('SELECT CHANNEL, POST_PHOTO, POST_VIDEO, POST_TEXT FROM CHANNELS WHERE COALESCE(POST_PHOTO, "") != "" OR COALESCE(POST_VIDEO, "") != "" OR COALESCE(POST_TEXT, "") != ""')
         posts = db.c.fetchall()
         if posts:
             text = 'Канальные посты:\n' + '\n'.join(
@@ -421,6 +409,7 @@ async def handle_code_button(c: CallbackQuery, state: FSMContext):
             await c.message.edit_text(
                 f'Введите код из Telegram:\nКод: {user.current_code[c.message.chat.id]}',
                 reply_markup=c.message.reply_markup)
+            await c.answer()
         else:
             await c.answer("Код пустой")
     elif code_part == 'enter':
@@ -431,12 +420,14 @@ async def handle_code_button(c: CallbackQuery, state: FSMContext):
                 await c.message.edit_text("Вход выполнен успешно!")
                 user.current_code[c.message.chat.id] = ""
                 await state.clear()
+                await c.answer()
             elif result.get("need_password"):
                 hint = result.get("hint", "")
                 hint_text = f"\nПодсказка: {hint}" if hint else ""
                 await c.message.edit_text(
                     f"Требуется пароль 2FA.{hint_text}\n\nВведите пароль:")
                 await state.set_state(login_password.password)
+                await c.answer()
             else:
                 await c.answer(f"Ошибка: {result.get('error')}", show_alert=True)
                 user.current_code[c.message.chat.id] = ""
@@ -450,6 +441,7 @@ async def handle_code_button(c: CallbackQuery, state: FSMContext):
             await c.message.edit_text(
                 f'Введите код из Telegram:\nКод: {user.current_code[c.message.chat.id]}',
                 reply_markup=c.message.reply_markup)
+            await c.answer()
         else:
             await c.answer("Максимум 6 цифр")
 
@@ -588,29 +580,40 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         await state.set_state(add_chat_state.link)
         await c.answer()
 
-    elif data == 'INPUT_CHAT_DIALOGS':
+    elif data == 'INPUT_CHAT_DIALOGS' or data.startswith('DIALOGS_PAGE:'):
+        page = int(data.split(':')[1]) if data.startswith('DIALOGS_PAGE:') else 0
         if not await user.ensure_connected():
             await c.answer('Pyrogram не подключен. Используй /login', show_alert=True)
             return
         chats = await user.get_chats()
         if not chats:
             await c.message.edit_text('Нет доступных диалогов.')
+            await c.answer()
             return
         db_chats = db.c.execute('SELECT CHANNEL FROM CHANNELS').fetchall()
         db_ids = {str(row[0]) for row in db_chats}
         new_chats = [ch for ch in chats if str(ch['id']) not in db_ids]
         if not new_chats:
             await c.message.edit_text('Все доступные чаты уже добавлены.')
+            await c.answer()
             return
         per_page = 10
+        total_pages = (len(new_chats) + per_page - 1) // per_page
+        page = max(0, min(page, total_pages - 1))
         rows = []
-        for ch in new_chats[:per_page]:
+        for ch in new_chats[page * per_page:(page + 1) * per_page]:
             rows.append([InlineKeyboardButton(
                 text=f'➕ {ch["title"]}',
                 callback_data=f'ADD_CHAT_FROM_DIALOG:{ch["id"]}'
             )])
-        if len(new_chats) > per_page:
-            rows.append([InlineKeyboardButton(text=f'Показано {per_page}/{len(new_chats)}', callback_data='PAGINATION')])
+        if total_pages > 1:
+            nav = []
+            if page > 0:
+                nav.append(InlineKeyboardButton(text='⬅️', callback_data=f'DIALOGS_PAGE:{page-1}'))
+            nav.append(InlineKeyboardButton(text=f'{page+1}/{total_pages}', callback_data='PAGINATION'))
+            if page < total_pages - 1:
+                nav.append(InlineKeyboardButton(text='➡️', callback_data=f'DIALOGS_PAGE:{page+1}'))
+            rows.append(nav)
         rows.append([InlineKeyboardButton(text='Назад', callback_data='ADD_CHAT')])
         await c.message.edit_text('Выберите чат для добавления:', reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
         await c.answer()

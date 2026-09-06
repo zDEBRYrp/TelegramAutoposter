@@ -1,4 +1,4 @@
-# TelegramAutoposter 1.1.12
+# TelegramAutoposter 1.1.13
 
 Telegram-бот для автоматической рассылки постов в супергруппы.
 
@@ -105,4 +105,4 @@ GNU GPL v3 - смотрите файл [LICENSE](LICENSE)
 
 ---
 
-TelegramAutoposter 1.1.12
+TelegramAutoposter 1.1.13
