@@ -54,10 +54,20 @@ async def start_client() -> bool:
 
     client = make_client()
     try:
-        await client.start()
+        # Мёртвая/просроченная сессия может висеть в переподключениях вечно —
+        # ограничиваем время старта, иначе весь бот не запустится
+        await asyncio.wait_for(client.start(), timeout=30)
         me = await client.get_me()
         logger.info(f"Pyrogram запущен как {me.first_name} ({me.phone_number})")
         return True
+    except asyncio.TimeoutError:
+        logger.error("Таймаут запуска Pyrogram (30с). Сессия битая? Удали session.session и войди через /login.")
+        try:
+            await client.stop()
+        except Exception:
+            pass
+        client = None
+        return False
     except AuthKeyUnregistered:
         logger.error("AuthKeyUnregistered. Удаляю сессию...")
         await _delete_session()
