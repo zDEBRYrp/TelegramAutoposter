@@ -2,12 +2,20 @@ import requests
 import os
 import sys
 import logging
-import subprocess
+import shutil
 
 logger = logging.getLogger(__name__)
 
-VERSION_URL = "https://raw.githubusercontent.com/zdebryrp/TelegramAutoposter/main/version.txt"
-RAW_CODE_URL = "https://raw.githubusercontent.com/zdebryrp/TelegramAutoposter/main/main.py"
+REPO = "zdebryrp/TelegramAutoposter"
+BRANCH = "main"
+VERSION_URL = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/version.txt"
+# Файлы, которые обновляем с GitHub (раньше обновлялся только main.py,
+# из-за чего version.txt никогда не менялся и апдейт предлагался вечно)
+UPDATE_FILES = ["main.py", "user.py", "sqliter.py", "config.py", "updater.py", "version.txt"]
+
+
+def _raw_url(filename: str) -> str:
+    return f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/{filename}"
 
 
 def get_current_version():
@@ -32,14 +40,22 @@ def get_latest_version():
 
 
 def update_code():
+    """Скачать свежие файлы с GitHub с бэкапом старых (.bak)."""
+    updated = []
     try:
-        response = requests.get(RAW_CODE_URL, timeout=10)
-        if response.status_code == 200:
-            with open("main.py", "wb") as f:
+        for filename in UPDATE_FILES:
+            response = requests.get(_raw_url(filename), timeout=15)
+            if response.status_code != 200:
+                logger.error(f"Ошибка обновления {filename}: HTTP {response.status_code}")
+                return False
+            if os.path.exists(filename):
+                shutil.copyfile(filename, filename + ".bak")
+            mode = "wb"
+            with open(filename, mode) as f:
                 f.write(response.content)
-            logger.info("Код обновлен")
-            return True
-        return False
+            updated.append(filename)
+        logger.info(f"Код обновлен: {updated}")
+        return True
     except Exception as e:
         logger.error(f"Ошибка обновления кода: {e}")
         return False
@@ -68,18 +84,21 @@ def check_update():
 
 def run_update():
     check = check_update()
-    
+
+    if check.get("error"):
+        return {"error": check["error"]}
+
     if not check.get("update_available"):
         return {"message": "Нет доступных обновлений"}
-    
+
     logger.info(f"Доступно обновление {check['latest']} (сейчас {check['current']})")
-    
+
     success = update_code()
-    
+
     if success:
         return {
             "message": "Обновление завершено успешно",
             "new_version": get_current_version()
         }
     else:
-        return {"error": "Ошибка обновления"}
+        return {"error": "Ошибка обновления (старые файлы сохранены как .bak)"}

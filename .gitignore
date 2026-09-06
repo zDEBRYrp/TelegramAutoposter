@@ -22,6 +22,8 @@ Thumbs.db
 # Data
 database.db
 session.session
+session.session-journal
+*.bak
 
 # Photos
 photos/*.jpg

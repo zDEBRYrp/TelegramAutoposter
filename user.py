@@ -1,3 +1,12 @@
+import asyncio as _asyncio
+try:
+    _asyncio.get_event_loop()
+except RuntimeError:
+    # Python 3.12+: у pyrogram 2.x в sync.py вызывается get_event_loop()
+    # на импорте — без активного loop импорт падает. Создаём заранее.
+    _asyncio.set_event_loop(_asyncio.new_event_loop())
+del _asyncio
+
 from pyrogram import Client, enums
 from pyrogram.errors import FloodWait, AuthKeyUnregistered, SessionPasswordNeeded
 import config
@@ -126,25 +135,43 @@ async def do_login(phone: str) -> Optional[str]:
     global phone_code_hash, client
     await _delete_session()
     client = make_client()
-    await client.connect()
+    try:
+        await client.connect()
+    except Exception as e:
+        logger.error(f"Ошибка подключения для отправки кода: {e}")
+        return None
     try:
         sent = await client.send_code(phone)
         phone_code_hash = sent.phone_code_hash
         return sent.phone_code_hash
     except Exception as e:
         logger.error(f"Ошибка отправки кода: {e}")
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
         return None
 
 
 async def do_sign_in(phone: str, code: str) -> dict:
     global client, phone_code_hash
+    if client is None:
+        return {"ok": False, "error": "Нет активной сессии входа. Отправьте /login заново."}
     try:
         await client.sign_in(phone, phone_code_hash, code)
-        await client.stop()
-        await start_client()
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        ok = await start_client()
+        if not ok:
+            return {"ok": False, "error": "Код принят, но не удалось запустить клиент"}
         return {"ok": True}
     except SessionPasswordNeeded:
-        hint = await client.get_password_hint()
+        try:
+            hint = await client.get_password_hint()
+        except Exception:
+            hint = ""
         return {"ok": False, "need_password": True, "hint": hint}
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -152,60 +179,102 @@ async def do_sign_in(phone: str, code: str) -> dict:
 
 async def do_check_password(password: str) -> dict:
     global client
+    if client is None:
+        return {"ok": False, "error": "Нет активной сессии входа. Отправьте /login заново."}
     try:
         await client.check_password(password)
-        await client.stop()
-        await start_client()
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        # Сбрасываем сохранённый пароль из памяти
+        globals()["login_password"] = None
+        ok = await start_client()
+        if not ok:
+            return {"ok": False, "error": "Пароль принят, но не удалось запустить клиент"}
         return {"ok": True}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+def _resolve_media(path_base: str):
+    """Найти файл медиа: точное имя, затем подбор расширения, затем photos/."""
+    import os as _os
+    if not path_base:
+        return None
+    try:
+        import config as _cfg
+        media_dir = getattr(_cfg, 'DIR', '') or ''
+    except Exception:
+        media_dir = ''
+    dirs = ([media_dir] if media_dir else []) + ['photos', '']
+    for d in dirs:
+        p = _os.path.join(d, path_base) if d else path_base
+        if _os.path.isfile(p):
+            return p
+    for d in dirs:
+        base = _os.path.join(d, path_base) if d else path_base
+        for ext in ['.jpg', '.jpeg', '.png', '.webp', '.mp4', '.mov', '.webm']:
+            if _os.path.isfile(base + ext):
+                return base + ext
+    return None
+
+
+def _to_html(text: str) -> str:
+    """Markdown -> HTML для отправки через Pyrogram."""
+    if not text:
+        return ''
+    try:
+        from sqliter import markdown_to_html as _m2h
+        return _m2h(text)
+    except Exception:
+        return text
 
 
 async def _send_with_fallback(chat_id: int, text: str, photo_path: str = None, video_path: str = None):
     """Отправить медиа с fallback на текст если чат не поддерживает."""
     from pyrogram.enums import ParseMode as PyroParseMode
 
+    html_text = _to_html(text) if text else None
+
     if photo_path:
-        for ext in ['.jpg', '.jpeg', '.png', '.webp', '']:
-            p = photo_path + ext if ext else photo_path
-            if os.path.exists(p):
-                try:
-                    await client.send_photo(chat_id, p, caption=text or None, parse_mode=PyroParseMode.HTML)
+        found = _resolve_media(photo_path) or (photo_path if os.path.exists(photo_path) else None)
+        if found:
+            try:
+                await client.send_photo(chat_id, found, caption=html_text, parse_mode=PyroParseMode.HTML)
+                return
+            except Exception as e:
+                err = str(e).lower()
+                if any(x in err for x in ['chat_send_photos_forbidden', 'chat_send_media_forbidden', 'media', 'forbidden']):
+                    logger.warning(f"Фото запрещено в {chat_id}, отправляю текст")
+                    if html_text:
+                        await client.send_message(chat_id, html_text, parse_mode=PyroParseMode.HTML)
                     return
-                except Exception as e:
-                    err = str(e).lower()
-                    if any(x in err for x in ['chat_send_photos_forbidden', 'media', 'forbidden']):
-                        logger.warning(f"Фото запрещено в {chat_id}, отправляю текст")
-                        if text:
-                            await client.send_message(chat_id, text, parse_mode=PyroParseMode.HTML)
-                        return
-                    raise
-        if text:
-            await client.send_message(chat_id, text, parse_mode=PyroParseMode.HTML)
+                raise
+        if html_text:
+            await client.send_message(chat_id, html_text, parse_mode=PyroParseMode.HTML)
         return
 
     if video_path:
-        for ext in ['.mp4', '.mov', '.webm', '']:
-            p = video_path + ext if ext else video_path
-            if os.path.exists(p):
-                try:
-                    await client.send_video(chat_id, p, caption=text or None, parse_mode=PyroParseMode.HTML)
+        found = _resolve_media(video_path) or (video_path if os.path.exists(video_path) else None)
+        if found:
+            try:
+                await client.send_video(chat_id, found, caption=html_text, parse_mode=PyroParseMode.HTML)
+                return
+            except Exception as e:
+                err = str(e).lower()
+                if any(x in err for x in ['chat_send_videos_forbidden', 'chat_send_media_forbidden', 'media', 'forbidden']):
+                    logger.warning(f"Видео запрещено в {chat_id}, отправляю текст")
+                    if html_text:
+                        await client.send_message(chat_id, html_text, parse_mode=PyroParseMode.HTML)
                     return
-                except Exception as e:
-                    err = str(e).lower()
-                    if any(x in err for x in ['chat_send_videos_forbidden', 'media', 'forbidden']):
-                        logger.warning(f"Видео запрещено в {chat_id}, отправляю текст")
-                        if text:
-                            await client.send_message(chat_id, text, parse_mode=PyroParseMode.HTML)
-                        return
-                    raise
-        if text:
-            await client.send_message(chat_id, text, parse_mode=PyroParseMode.HTML)
+                raise
+        if html_text:
+            await client.send_message(chat_id, html_text, parse_mode=PyroParseMode.HTML)
         return
 
-    if text:
-        from pyrogram.enums import ParseMode as PyroParseMode
-        await client.send_message(chat_id, text, parse_mode=PyroParseMode.HTML)
+    if html_text:
+        await client.send_message(chat_id, html_text, parse_mode=PyroParseMode.HTML)
 
 
 async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None:
@@ -214,22 +283,39 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
 
     try:
         while True:
-            settings = db.settings()
-            if settings[4] != 1:
+            try:
+                settings = db.settings()
+            except Exception as e:
+                logger.error(f"Ошибка чтения настроек: {e}")
+                await asyncio.sleep(30)
+                continue
+            if not settings or settings[4] != 1:
                 break
 
-            active_channels = [
-                chat for chat in spam_list
-                if db.get_channel_spam_status(chat['id']) == 1
-            ]
+            default_timeout = settings[5] if len(settings) > 5 else 5
+
+            # Обновляем доп. текст и отсев выключенных на каждой итерации
+            active_channels = []
+            for chat in spam_list:
+                try:
+                    if db.get_channel_spam_status(chat['id']) != 1:
+                        continue
+                    addit = db.get_additional_text(chat['id'])
+                    chat['text'] = addit[0] if addit and addit[0] else ''
+                    active_channels.append(chat)
+                except Exception as e:
+                    logger.error(f"Ошибка подготовки чата {chat.get('id')}: {e}")
 
             if not active_channels:
                 await asyncio.sleep(30)
                 continue
 
             for chat in active_channels:
-                settings = db.settings()
-                if settings[4] != 1:
+                try:
+                    settings = db.settings()
+                except Exception:
+                    settings = None
+                if not settings or settings[4] != 1:
                     break
 
                 if not await ensure_connected():
@@ -251,7 +337,9 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                             await _send_with_fallback(chat['id'], text, video_path=video_path)
                         else:
                             if text:
-                                await client.send_message(chat['id'], text)
+                                from pyrogram.enums import ParseMode as PyroParseMode
+                                await client.send_message(chat['id'], _to_html(text),
+                                                          parse_mode=PyroParseMode.HTML)
                     else:
                         # settings: [0]=ID, [1]=PHOTO, [2]=VIDEO, [3]=TEXT, [4]=SPAM, [5]=TIMEOUT
                         text = settings[3] or ''
@@ -266,17 +354,30 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                             await _send_with_fallback(chat['id'], text, video_path=video_path)
                         else:
                             if text:
-                                await client.send_message(chat['id'], text)
+                                from pyrogram.enums import ParseMode as PyroParseMode
+                                await client.send_message(chat['id'], _to_html(text),
+                                                          parse_mode=PyroParseMode.HTML)
 
-                    timeout = db.settings()[5]
+                    # Индивидуальный таймаут чата, иначе глобальный
+                    try:
+                        per_chat = db.get_channel_timeout(chat['id'])
+                    except Exception:
+                        per_chat = None
+                    timeout = per_chat if per_chat and per_chat >= 1 else default_timeout
                     await asyncio.sleep(timeout * 60)
 
                 except FloodWait as e:
-                    logger.warning(f"FloodWait {e.value}s")
-                    await asyncio.sleep(e.value)
+                    wait = int(getattr(e, 'value', 30) or 30)
+                    logger.warning(f"FloodWait {wait}s")
+                    await asyncio.sleep(wait)
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
                     logger.error(f"Ошибка отправки в {chat['id']}: {e}")
                     await asyncio.sleep(10)
 
+    except asyncio.CancelledError:
+        logger.info("Спам-цикл остановлен")
+        raise
     except Exception as e:
         logger.error(f"Ошибка в spamming: {e}")

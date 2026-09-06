@@ -1,5 +1,5 @@
-aiogram>=3.16.0
-pyrogram>=2.0.0
+aiogram>=3.16.0,<4.0.0
+pyrogram>=2.0.0,<3.0.0
 tgcrypto>=1.2.5
 markdown2>=2.4.0
 python-dotenv>=1.0.0
