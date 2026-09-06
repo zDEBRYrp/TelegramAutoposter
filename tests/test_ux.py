@@ -104,3 +104,39 @@ def test_chat_settings_keyboard_indicators():
     texts = [b.text for row in kb.inline_keyboard for b in row]
     assert any('9 мин' in t for t in texts)
     assert any('ВЫКЛ' in t for t in texts)
+
+
+def test_chats_filter_tabs_present():
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+    chats = [{'id': -1, 'title': 'A'}, {'id': -2, 'title': 'B'}]
+    with patch.object(main.user, 'get_chats', new=AsyncMock(return_value=chats)):
+        from sqliter import DBConnection
+        db = DBConnection(db_path=':memory:')
+        db.add_channel(-1)
+        db.c.execute('UPDATE CHANNELS SET SPAM_ENABLED = 1 WHERE CHANNEL = ?',
+                     [str(-1)])
+        db.conn.commit()
+        db.add_channel(-2)
+        old = main.db
+        main.db = db
+        try:
+            kb_all, _ = asyncio.run(main.get_chats_keyboard(0, 'all'))
+            kb_on, _ = asyncio.run(main.get_chats_keyboard(0, 'on'))
+            kb_off, _ = asyncio.run(main.get_chats_keyboard(0, 'off'))
+        finally:
+            main.db = old
+    tabs = [b.callback_data for b in kb_all.inline_keyboard[0]]
+    assert tabs == ['CHATS_FILTER:all', 'CHATS_FILTER:on', 'CHATS_FILTER:off']
+    assert '●' in kb_all.inline_keyboard[0][0].text  # активная вкладка помечена
+    # в фильтре "вкл" только включённый чат
+    on_toggles = [b.callback_data for row in kb_on.inline_keyboard[1:]
+                  for b in row if b.callback_data.startswith('TOGGLE_SPAM:')]
+    assert on_toggles == ['TOGGLE_SPAM:-1:0:on']
+    off_toggles = [b.callback_data for row in kb_off.inline_keyboard[1:]
+                   for b in row if b.callback_data.startswith('TOGGLE_SPAM:')]
+    assert off_toggles == ['TOGGLE_SPAM:-2:0:off']
+
+
+def test_markdown_hint_mentions_spoiler():
+    assert '||спойлер||' in main.MARKDOWN_HINT

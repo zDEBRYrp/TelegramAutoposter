@@ -36,6 +36,22 @@ def markdown_to_html(text: str) -> str:
                   lambda m: _store(f'<code>{m.group(1)}</code>'),
                   text)
 
+    # Цитаты "> строка" (после экранирования это "&gt;") — группируем подряд
+    lines = text.split('\n')
+    out_lines: list[str] = []
+    quote_buf: list[str] = []
+    for line in lines:
+        if line.startswith('&gt; ') or line == '&gt;':
+            quote_buf.append(line[5:] if line.startswith('&gt; ') else '')
+        else:
+            if quote_buf:
+                out_lines.append('<blockquote>' + '\n'.join(quote_buf) + '</blockquote>')
+                quote_buf = []
+            out_lines.append(line)
+    if quote_buf:
+        out_lines.append('<blockquote>' + '\n'.join(quote_buf) + '</blockquote>')
+    text = '\n'.join(out_lines)
+
     # Жирный **text** или __text__
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
     text = re.sub(r'__(.+?)__', r'<b>\1</b>', text, flags=re.DOTALL)
@@ -47,8 +63,21 @@ def markdown_to_html(text: str) -> str:
     # Зачёркнутый ~~text~~
     text = re.sub(r'~~(.+?)~~', r'<s>\1</s>', text, flags=re.DOTALL)
 
-    # Ссылки [text](url)
-    text = re.sub(r'\[(.+?)\]\((https?://[^\)]+)\)', r'<a href="\2">\1</a>', text)
+    # Спойлер ||text||
+    text = re.sub(r'\|\|(.+?)\|\|', r'<tg-spoiler>\1</tg-spoiler>', text, flags=re.DOTALL)
+
+    # Ссылки [text](url): разрешаем https://, tg://, t.me/..., @user
+    def _link(m: 're.Match') -> str:
+        title, url = m.group(1), m.group(2).strip()
+        if url.startswith('@'):
+            url = 'https://t.me/' + url[1:]
+        elif url.startswith(('t.me/', 'telegram.me/')):
+            url = 'https://' + url
+        if not url.startswith(('http://', 'https://', 'tg://')):
+            return m.group(0)  # не ссылка — оставляем как есть
+        return f'<a href="{url}">{title}</a>'
+
+    text = re.sub(r'\[(.+?)\]\(([^)\s]+)\)', _link, text)
 
     for key, html in placeholders.items():
         text = text.replace(key, html)

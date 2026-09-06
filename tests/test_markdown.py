@@ -41,3 +41,43 @@ def test_html_escaped():
 def test_empty():
     assert markdown_to_html('') == ''
     assert markdown_to_html(None) is None
+
+
+def test_spoiler():
+    assert '<tg-spoiler>s</tg-spoiler>' in markdown_to_html('||s||')
+
+
+def test_spoiler_with_bold_inside():
+    out = markdown_to_html('||**b**||')
+    assert '<tg-spoiler><b>b</b></tg-spoiler>' in out
+
+
+def test_single_pipe_untouched():
+    assert markdown_to_html('a | b') == 'a | b'
+
+
+def test_quote():
+    out = markdown_to_html('> hello')
+    assert out == '<blockquote>hello</blockquote>'
+
+
+def test_quote_multiline_grouped():
+    out = markdown_to_html('> a\n> b\nplain')
+    assert out == '<blockquote>a\nb</blockquote>\nplain'
+
+
+def test_quote_with_markdown_inside():
+    out = markdown_to_html('> **b**')
+    assert out == '<blockquote><b>b</b></blockquote>'
+
+
+def test_link_tme_normalized():
+    assert '<a href="https://t.me/x">t</a>' in markdown_to_html('[t](t.me/x)')
+
+
+def test_link_mention_normalized():
+    assert '<a href="https://t.me/durov">t</a>' in markdown_to_html('[t](@durov)')
+
+
+def test_link_non_url_left_as_is():
+    assert markdown_to_html('[t](notaurl)') == '[t](notaurl)'

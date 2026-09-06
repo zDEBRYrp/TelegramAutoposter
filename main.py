@@ -29,7 +29,10 @@ from aiogram.types import FSInputFile
 
 CODE_PROMPT = ('Введите код из Telegram:\nКод: {code}\n\n'
                '⚠️ Код вводите <b>только кнопками ниже</b> — '
-               'не отправляйте его сообщением в чат, такой код не приму.') 
+               'не отправляйте его сообщением в чат, такой код не приму.')
+
+MARKDOWN_HINT = ('\n\nРазметка: **жирный**, *курсив*, ~~зачёрк~~, '
+                 '||спойлер||, `код`, [текст](ссылка), > цитата') 
 
 def get_version():
     try:
@@ -234,7 +237,19 @@ def format_chat_info(chat_id: int) -> str:
             f'📝 Пост: {post_desc}')
 
 
-async def get_chats_keyboard(page=0):
+CHAT_FILTERS = ('all', 'on', 'off')
+FILTER_NAMES = {'all': 'все', 'on': 'включённые', 'off': 'выключенные'}
+
+
+def chats_header(total: int, active: int, filt: str) -> str:
+    return (f'💬 <b>Чаты</b> — {FILTER_NAMES.get(filt, "все")} '
+            f'(активно {active} из {total})\n'
+            f'Нажми на чат чтобы вкл/выкл, ⚙️ — настройки')
+
+
+async def get_chats_keyboard(page=0, filt='all'):
+    if filt not in CHAT_FILTERS:
+        filt = 'all'
     chats = await user.get_chats()
     per_page = 10
 
@@ -242,40 +257,63 @@ async def get_chats_keyboard(page=0):
     for chat in chats:
         db.add_channel(chat['id'])
 
-    # Сортируем: включённые сверху
+    total = len(chats)
+    active = sum(1 for ch in chats if db.get_channel_spam_status(ch['id']) == 1)
+
+    # Фильтр + сортировка: включённые всегда наверху
+    if filt == 'on':
+        chats = [ch for ch in chats if db.get_channel_spam_status(ch['id']) == 1]
+    elif filt == 'off':
+        chats = [ch for ch in chats if db.get_channel_spam_status(ch['id']) != 1]
+
     def sort_key(chat):
         return 0 if db.get_channel_spam_status(chat['id']) == 1 else 1
 
     chats.sort(key=sort_key)
 
+    total_pages = max(1, (len(chats) + per_page - 1) // per_page)
+    page = max(0, min(page, total_pages - 1))
     start = page * per_page
     end = start + per_page
     page_chats = chats[start:end]
 
     keyboard = []
+    # Вкладки фильтра со счётчиками
+    off_count = total - active
+    tabs = [
+        InlineKeyboardButton(
+            text=f'{"● " if filt == "all" else ""}📋 Все ({total})',
+            callback_data='CHATS_FILTER:all'),
+        InlineKeyboardButton(
+            text=f'{"● " if filt == "on" else ""}✅ Вкл ({active})',
+            callback_data='CHATS_FILTER:on'),
+        InlineKeyboardButton(
+            text=f'{"● " if filt == "off" else ""}⬜ Выкл ({off_count})',
+            callback_data='CHATS_FILTER:off'),
+    ]
+    keyboard.append(tabs)
     for chat in page_chats:
         spam_status = db.get_channel_spam_status(chat['id'])
         icon = '✅' if spam_status == 1 else '⬜'
         keyboard.append([
             InlineKeyboardButton(
                 text=f'{icon} {chat["title"]}',
-                callback_data=f'TOGGLE_SPAM:{chat["id"]}:{page}'
+                callback_data=f'TOGGLE_SPAM:{chat["id"]}:{page}:{filt}'
             ),
             InlineKeyboardButton(text='⚙️', callback_data=f'EDIT_CHAT:{chat["id"]}')
         ])
 
     if len(chats) > per_page:
         pagination = []
-        total_pages = (len(chats) + per_page - 1) // per_page
         if page > 0:
-            pagination.append(InlineKeyboardButton(text='⬅️', callback_data=f'CHATS_PAGE:{page-1}'))
+            pagination.append(InlineKeyboardButton(text='⬅️', callback_data=f'CHATS_PAGE:{page-1}:{filt}'))
         pagination.append(InlineKeyboardButton(text=f'{page+1}/{total_pages}', callback_data='PAGINATION'))
         if page < total_pages - 1:
-            pagination.append(InlineKeyboardButton(text='➡️', callback_data=f'CHATS_PAGE:{page+1}'))
+            pagination.append(InlineKeyboardButton(text='➡️', callback_data=f'CHATS_PAGE:{page+1}:{filt}'))
         keyboard.append(pagination)
 
     keyboard.append([InlineKeyboardButton(text='➕ Добавить чат', callback_data='ADD_CHAT')])
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+    return InlineKeyboardMarkup(inline_keyboard=keyboard), chats_header(total, active, filt)
 
 
 class login_phone(StatesGroup):
@@ -496,15 +534,8 @@ async def stop_spam_cmd(message: Message):
 async def chat_settings_menu(message: Message):
     if await _deny_if_not_admin(message):
         return
-    try:
-        all_chats = db.c.execute('SELECT COUNT(*), COALESCE(SUM(SPAM_ENABLED), 0) FROM CHANNELS').fetchone()
-        total, active = (all_chats[0] or 0), (all_chats[1] or 0)
-    except Exception:
-        total, active = 0, 0
-    keyboard = await get_chats_keyboard(0)
-    await message.answer(f'💬 <b>Чаты</b> — активно {active} из {total}\n'
-                         f'Нажми на чат чтобы вкл/выкл, ⚙️ — настройки',
-                         reply_markup=keyboard)
+    keyboard, header = await get_chats_keyboard(0)
+    await message.answer(header, reply_markup=keyboard)
 
 @router.message(F.text == BTN_CPOSTS)
 async def channel_posts_menu(message: Message):
@@ -639,18 +670,38 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
     data = c.data
 
     if data.startswith('CHATS_PAGE:'):
-        page = int(data.split(':')[1])
-        keyboard = await get_chats_keyboard(page)
+        sp = data.split(':')
+        page = int(sp[1]) if len(sp) > 1 and sp[1].lstrip('-').isdigit() else 0
+        filt = sp[2] if len(sp) > 2 and sp[2] in CHAT_FILTERS else 'all'
+        keyboard, header = await get_chats_keyboard(page, filt)
         try:
-            await c.message.edit_reply_markup(reply_markup=keyboard)
+            await c.message.edit_text(header, reply_markup=keyboard, parse_mode=ParseMode.HTML)
         except Exception:
-            pass
+            try:
+                await c.message.edit_reply_markup(reply_markup=keyboard)
+            except Exception:
+                pass
+        await c.answer()
+
+    elif data.startswith('CHATS_FILTER:'):
+        filt = data.split(':')[1] if ':' in data else 'all'
+        if filt not in CHAT_FILTERS:
+            filt = 'all'
+        keyboard, header = await get_chats_keyboard(0, filt)
+        try:
+            await c.message.edit_text(header, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+        except Exception:
+            try:
+                await c.message.edit_reply_markup(reply_markup=keyboard)
+            except Exception:
+                pass
         await c.answer()
 
     elif data.startswith('TOGGLE_SPAM:'):
         parts = data.split(':')
         chat_id = int(parts[1])
-        page = int(parts[2]) if len(parts) > 2 else 0
+        page = int(parts[2]) if len(parts) > 2 and parts[2].lstrip('-').isdigit() else 0
+        filt = parts[3] if len(parts) > 3 and parts[3] in CHAT_FILTERS else 'all'
         current = db.get_channel_spam_status(chat_id)
         if current == 1:
             db.stop_spam_for_channel(chat_id)
@@ -659,11 +710,14 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
             db.c.execute('UPDATE CHANNELS SET SPAM_ENABLED = 1 WHERE CHANNEL = ?', [str(chat_id)])
             db.conn.commit()
             toast = '✅ Рассылка включена'
-        keyboard = await get_chats_keyboard(page)
+        keyboard, header = await get_chats_keyboard(page, filt)
         try:
-            await c.message.edit_reply_markup(reply_markup=keyboard)
+            await c.message.edit_text(header, reply_markup=keyboard, parse_mode=ParseMode.HTML)
         except Exception:
-            pass
+            try:
+                await c.message.edit_reply_markup(reply_markup=keyboard)
+            except Exception:
+                pass
         await c.answer(toast)
 
     elif data.startswith('TOGGLE_SPAM_SETTINGS:'):
@@ -760,18 +814,14 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
             await c.answer(f'Ошибка: {e}', show_alert=True)
 
     elif data == 'BACK_TO_CHATS':
-        keyboard = await get_chats_keyboard(0)
-        try:
-            all_chats = db.c.execute('SELECT COUNT(*), COALESCE(SUM(SPAM_ENABLED), 0) FROM CHANNELS').fetchone()
-            total, active = (all_chats[0] or 0), (all_chats[1] or 0)
-        except Exception:
-            total, active = 0, 0
-        header = (f'💬 <b>Чаты</b> — активно {active} из {total}\n'
-                  f'Нажми на чат чтобы вкл/выкл, ⚙️ — настройки')
+        keyboard, header = await get_chats_keyboard(0)
         try:
             await c.message.edit_text(header, reply_markup=keyboard, parse_mode=ParseMode.HTML)
         except Exception:
-            await c.message.edit_reply_markup(reply_markup=keyboard)
+            try:
+                await c.message.edit_reply_markup(reply_markup=keyboard)
+            except Exception:
+                pass
         await c.answer()
 
     elif data.startswith('CHANGE_TIMEOUT:'):
@@ -785,7 +835,7 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
     elif data.startswith('ADD_ADDITIONAL:'):
         chat_id = int(data.split(':')[1])
         await state.set_data({'chat_id': chat_id})
-        await c.message.edit_text('Введите дополнительный текст для чата:')
+        await c.message.edit_text('Введите дополнительный текст для чата:' + MARKDOWN_HINT)
         await state.set_state(addition.id)
         await c.answer()
 
@@ -851,7 +901,7 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
     elif data.startswith('CHANNEL_EDIT_TEXT:'):
         chat_id = int(data.split(':')[1])
         await state.set_data({'chat_id': chat_id})
-        await c.message.edit_text('Введите текст канального поста (Markdown поддерживается):')
+        await c.message.edit_text('Введите текст поста чата:' + MARKDOWN_HINT)
         await state.set_state(channel_post_text.text)
         await c.answer()
 
@@ -876,7 +926,7 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         await c.answer()
 
     elif data == 'EDIT_TEXT':
-        await c.message.edit_text('Введите текст глобального поста:')
+        await c.message.edit_text('Введите текст глобального поста:' + MARKDOWN_HINT)
         await state.set_state(post.text)
         await c.answer()
 
@@ -997,7 +1047,7 @@ async def input_chat_username(m: Message, state: FSMContext):
         username = username.lstrip('@')
         chat = await user.client.get_chat(username)
         db.add_channel(chat.id)
-        await bot.send_message(m.chat.id, f'Чат @{username} (ID: {chat.id}) успешно добавлен!')
+        await bot.send_message(m.chat.id, f'Чат @{html.escape(username)} (ID: {chat.id}) успешно добавлен!')
     except Exception as e:
         await bot.send_message(m.chat.id, f'Ошибка: {e}')
     finally:
@@ -1029,7 +1079,7 @@ async def input_chat_link(m: Message, state: FSMContext):
         username = match.group(1)
         chat = await user.client.get_chat(username)
         db.add_channel(chat.id)
-        await bot.send_message(m.chat.id, f'Чат {chat.title} (ID: {chat.id}) успешно добавлен!')
+        await bot.send_message(m.chat.id, f'Чат {html.escape(chat.title or username)} (ID: {chat.id}) успешно добавлен!')
     except Exception as e:
         await bot.send_message(m.chat.id, f'Ошибка: {e}')
     finally:
