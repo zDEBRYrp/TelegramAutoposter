@@ -5,9 +5,10 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram import Router, F
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramConflictError
 from aiogram.types import (
     Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton, PhotoSize, Video
+    InlineKeyboardMarkup, InlineKeyboardButton, ErrorEvent
 )
 
 import html
@@ -25,7 +26,10 @@ from sqliter import DBConnection, markdown_to_html
 router = Router()
 from aiogram.client.default import DefaultBotProperties
 from aiogram.types import FSInputFile
-from aiogram.filters import StateFilter
+
+CODE_PROMPT = ('Введите код из Telegram:\nКод: {code}\n\n'
+               '⚠️ Код вводите <b>только кнопками ниже</b> — '
+               'не отправляйте его сообщением в чат, такой код не приму.') 
 
 def get_version():
     try:
@@ -360,6 +364,8 @@ async def _deny_if_not_admin(message: Message) -> bool:
     uid = message.from_user.id if message.from_user else 0
     if message.chat.id in config.ADMINS or uid in config.ADMINS:
         return False
+    logger.warning(f"Отказ в доступе: uid={uid} chat={message.chat.id} "
+                   f"type={message.chat.type} text={_short(message.text or '', 40)!r}")
     if message.chat.type != 'private':
         return True
     await message.answer("Нет доступа")
@@ -544,7 +550,7 @@ async def handle_code_button(c: CallbackQuery, state: FSMContext):
         if current_code_val:
             user.current_code[c.message.chat.id] = current_code_val[:-1]
             await c.message.edit_text(
-                f'Введите код из Telegram:\nКод: {user.current_code[c.message.chat.id]}',
+                CODE_PROMPT.format(code=user.current_code[c.message.chat.id]),
                 reply_markup=c.message.reply_markup)
             await c.answer()
         else:
@@ -568,7 +574,7 @@ async def handle_code_button(c: CallbackQuery, state: FSMContext):
             else:
                 await c.answer(f"Ошибка: {result.get('error')}", show_alert=True)
                 user.current_code[c.message.chat.id] = ""
-                await c.message.edit_text('Введите код из Telegram:\nКод: ',
+                await c.message.edit_text(CODE_PROMPT.format(code=''),
                                           reply_markup=c.message.reply_markup)
         else:
             await c.answer("Введите код", show_alert=True)
@@ -576,7 +582,7 @@ async def handle_code_button(c: CallbackQuery, state: FSMContext):
         if len(current_code_val) < 6:
             user.current_code[c.message.chat.id] = current_code_val + code_part
             await c.message.edit_text(
-                f'Введите код из Telegram:\nКод: {user.current_code[c.message.chat.id]}',
+                CODE_PROMPT.format(code=user.current_code[c.message.chat.id]),
                 reply_markup=c.message.reply_markup)
             await c.answer()
         else:
@@ -1258,7 +1264,7 @@ async def handle_phone_input(m: Message, state: FSMContext):
              InlineKeyboardButton(text='0', callback_data='code_0'),
              InlineKeyboardButton(text='Войти', callback_data='code_enter')]
         ])
-        msg = await m.answer('Введите код из Telegram:\nКод: ', reply_markup=keyboard)
+        msg = await m.answer(CODE_PROMPT.format(code=''), reply_markup=keyboard)
         user.code_messages[m.chat.id] = msg.message_id
         await state.set_state(login_code.code)
     else:
@@ -1271,27 +1277,14 @@ async def handle_phone_input(m: Message, state: FSMContext):
 async def handle_code_text(m: Message, state: FSMContext):
     if await _deny_if_not_admin(m):
         return
-    code = (m.text or '').strip().replace(' ', '').replace('-', '')
+    # Код сообщением не принимаем: сразу удаляем из чата (безопасность)
+    # и просим ввести кнопками.
     try:
         await m.delete()
     except Exception:
         pass
-    # Разрешаем ввод кода текстом, а не только кнопками
-    if re.fullmatch(r'\d{4,6}', code) and user.login_phone:
-        result = await user.do_sign_in(user.login_phone, code)
-        if result.get("ok"):
-            await m.answer("Вход выполнен успешно!")
-            user.current_code[m.chat.id] = ""
-            await state.clear()
-        elif result.get("need_password"):
-            hint = result.get("hint", "")
-            hint_text = f"\nПодсказка: {hint}" if hint else ""
-            await m.answer(f"Требуется пароль 2FA.{hint_text}\n\nВведите пароль:")
-            await state.set_state(login_password.password)
-        else:
-            await m.answer(f"Ошибка: {result.get('error')}\nПопробуйте ещё раз или используйте кнопки.")
-    else:
-        await m.answer('Используйте кнопки для ввода кода или отправьте код цифрами.')
+    await m.answer('⚠️ Код сообщением не принимаю — он так не сработает.\n'
+                   'Вводите код кнопками в сообщении выше ⬆️')
 
 
 @router.message(F.text)
@@ -1362,6 +1355,13 @@ async def start_spam_loop() -> int:
 
 
 async def main():
+    logger.info(f"Autoposter {get_version()} стартует. Админы: {config.ADMINS}")
+    try:
+        st = db.settings()
+        logger.info(f"Настройки: спам={'ВКЛ' if st[4] == 1 else 'ВЫКЛ'}, "
+                    f"интервал={st[5]} мин.")
+    except Exception as e:
+        logger.error(f"Не смог прочитать настройки: {e}")
     # Запускаем Pyrogram клиент при старте
     connected = await user.start_client()
     if not connected:
@@ -1372,7 +1372,33 @@ async def main():
             await start_spam_loop()
     except Exception as e:
         logger.error(f"Ошибка автовозобновления спама: {e}")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    except TelegramConflictError:
+        logger.error("Telegram Conflict: этот же токен уже опрашивает ДРУГОЙ запущенный "
+                     "экземпляр бота. Симптом — команды 'не работают'. Останови дубль.")
+        raise
+
+
+@dp.error()
+async def error_handler(event: ErrorEvent):
+    logger.exception(f"Ошибка хендлера: {event.exception!r}")
+    chat_id = None
+    try:
+        upd = event.update
+        msg = getattr(upd, 'message', None) or getattr(upd, 'edited_message', None)
+        if msg is not None:
+            chat_id = msg.chat.id
+        elif getattr(upd, 'callback_query', None) is not None:
+            chat_id = upd.callback_query.message.chat.id
+    except Exception:
+        pass
+    try:
+        text = f'⚠️ Ошибка: {type(event.exception).__name__}: {event.exception}'.strip()
+        if chat_id in config.ADMINS:
+            await bot.send_message(chat_id, _short(text, 300))
+    except Exception:
+        pass
 
 
 if __name__ == '__main__':

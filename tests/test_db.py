@@ -66,6 +66,15 @@ def test_unknown_channel_timeout_is_none(db):
     assert db.get_channel_timeout(111222333) is None
 
 
+def test_connection_has_lock_timeout(tmp_path):
+    d = DBConnection(db_path=str(tmp_path / 't.db'))
+    try:
+        assert d.conn.execute('PRAGMA busy_timeout').fetchone()[0] >= 30000
+    finally:
+        d.c.close()
+        d.conn.close()
+
+
 def test_clear_channel_post(db):
     db.set_channel_post(CID, photo='pic.jpg')
     db.set_channel_post(CID, text='hello')

@@ -62,7 +62,9 @@ class DBConnection(object):
             self.db_path = db_path
         else:
             self.db_path = f'{config.DIR}database.db' if getattr(config, 'DIR', '') else 'database.db'
-        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        # timeout: второй процесс (дубль бота) может держать блокировку —
+        # ждём, а не падаем сразу с "database is locked"
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30.0)
         self.c = self.conn.cursor()
         self.init_db()
     
