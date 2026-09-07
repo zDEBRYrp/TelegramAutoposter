@@ -440,21 +440,30 @@ async def get_chats_keyboard(page=0, filt='all'):
     chats = await user.get_chats()
     per_page = 10
 
-    # Убедимся что все чаты есть в БД (новые добавляем как выключенные)
-    for chat in chats:
-        db.add_channel(chat['id'])
+    # Статусы одним запросом + дозапись новых чатов пачкой (было N+1 запросов)
+    rows = db.c.execute('SELECT CHANNEL, SPAM_ENABLED FROM CHANNELS').fetchall()
+    statuses = {str(r[0]): (r[1] or 0) for r in rows}
+    missing = [str(ch['id']) for ch in chats if str(ch['id']) not in statuses]
+    if missing:
+        db.c.executemany(
+            'INSERT OR IGNORE INTO CHANNELS (CHANNEL, ADDITIONAL, SPAM_ENABLED, TIMEOUT) '
+            'VALUES (?, ?, ?, ?)',
+            [(cid, '', 0, 5) for cid in missing])
+        db.conn.commit()
+        for cid in missing:
+            statuses[cid] = 0
 
     total = len(chats)
-    active = sum(1 for ch in chats if db.get_channel_spam_status(ch['id']) == 1)
+    active = sum(1 for ch in chats if statuses.get(str(ch['id']), 0) == 1)
 
     # Фильтр + сортировка: включённые всегда наверху
     if filt == 'on':
-        chats = [ch for ch in chats if db.get_channel_spam_status(ch['id']) == 1]
+        chats = [ch for ch in chats if statuses.get(str(ch['id']), 0) == 1]
     elif filt == 'off':
-        chats = [ch for ch in chats if db.get_channel_spam_status(ch['id']) != 1]
+        chats = [ch for ch in chats if statuses.get(str(ch['id']), 0) != 1]
 
     def sort_key(chat):
-        return 0 if db.get_channel_spam_status(chat['id']) == 1 else 1
+        return 0 if statuses.get(str(chat['id']), 0) == 1 else 1
 
     chats.sort(key=sort_key)
 
@@ -480,7 +489,7 @@ async def get_chats_keyboard(page=0, filt='all'):
     ]
     keyboard.append(tabs)
     for chat in page_chats:
-        spam_status = db.get_channel_spam_status(chat['id'])
+        spam_status = statuses.get(str(chat['id']), 0)
         icon = '✅' if spam_status == 1 else '⬜'
         keyboard.append([
             InlineKeyboardButton(
@@ -535,7 +544,7 @@ class channel_post_photo(StatesGroup):
 class channel_post_video(StatesGroup):
     video = State()
 
-class time(StatesGroup):
+class global_time(StatesGroup):
     timeout = State()
 
 class channel_time(StatesGroup):
@@ -1246,7 +1255,7 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         settings = db.settings()
         await state.set_data({'prompt_id': c.message.message_id})
         await c.message.edit_text(f'Текущий интервал: {settings[5]} мин.\nВведите новый интервал:')
-        await state.set_state(time.timeout)
+        await state.set_state(global_time.timeout)
         await c.answer()
 
     elif data == 'PAGINATION':
@@ -1538,7 +1547,7 @@ async def download_global_video(m: Message, state: FSMContext):
     await state.clear()
 
 
-@router.message(time.timeout)
+@router.message(global_time.timeout)
 async def input_timeout(m: Message, state: FSMContext):
     if await _deny_if_not_admin(m):
         await state.clear()

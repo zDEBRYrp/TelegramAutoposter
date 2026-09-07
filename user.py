@@ -33,6 +33,10 @@ phone_code_hash = None
 # Последний результат отправки: chat_id -> {'ok': bool, 'error': str, 'at': float}
 send_status: dict = {}
 
+# Кэш диалогов для меню
+_chats_cache: dict = {'at': 0.0, 'data': []}
+CHATS_CACHE_TTL = 60
+
 
 def init_bot(bot):
     global bot_instance
@@ -110,6 +114,8 @@ async def notify_admin(text: str) -> None:
 
 async def _delete_session():
     await stop_client()
+    _chats_cache['at'] = 0.0
+    _chats_cache['data'] = []
     for f in ["session.session", "session.session-journal"]:
         if os.path.exists(f):
             os.remove(f)
@@ -123,9 +129,15 @@ async def ensure_connected() -> bool:
     return await start_client()
 
 
-async def get_chats() -> List[Dict[str, Any]]:
+async def get_chats(force: bool = False) -> List[Dict[str, Any]]:
+    """Диалоги-чаты. Кэшируем на минуту — меню не должно дёргать сеть
+    на каждый тап (отсюда были апдейты по 20+ секунд)."""
+    now = _time.time()
+    if not force and _chats_cache['data'] and now - _chats_cache['at'] < CHATS_CACHE_TTL:
+        return [dict(c) for c in _chats_cache['data']]
+
     if not await ensure_connected():
-        return []
+        return [dict(c) for c in _chats_cache['data']] if _chats_cache['data'] else []
 
     chat_list = []
     try:
@@ -141,7 +153,12 @@ async def get_chats() -> List[Dict[str, Any]]:
         await notify_admin("Сессия недействительна. Отправь /login для входа.")
     except Exception as e:
         logger.error(f"Ошибка получения чатов: {e}")
-    return chat_list
+        if _chats_cache['data']:
+            return [dict(c) for c in _chats_cache['data']]
+        return []
+    _chats_cache['at'] = _time.time()
+    _chats_cache['data'] = chat_list
+    return [dict(c) for c in chat_list]
 
 
 async def leave_from_channel(channel_id: int) -> bool:
