@@ -434,7 +434,27 @@ async def _log_send(db, chat: Dict[str, Any], text: str,
         logger.warning(f"Не смог записать в лог-чат {dest}: {e}")
 
 
+SEND_STAGGER_SEC = 5  # пауза между отправками в РАЗНЫЕ чаты (антифлуд)
+POLL_STEP_SEC = 15  # гранулярность проверки флага/расписания
+
+
+def _plan_sends(roster, statuses, next_at, now):
+    """Чистая функция планировщика.
+
+    Каждый чат живёт по своему таймеру: due — кому пора слать прямо сейчас,
+    wait — через сколько проснуться (до ближайшего дедлайна).
+    """
+    due = [c for c in roster
+           if statuses.get(c['id']) == 1 and next_at.get(c['id'], 0) <= now]
+    future = [t for cid, t in next_at.items()
+              if t > now and statuses.get(cid) == 1]
+    wait = (min(future) - now) if future else POLL_STEP_SEC
+    return due, max(0, wait)
+
+
 async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None:
+    """Рассылка с независимыми таймерами: каждый чат шлётся по своему
+    интервалу, а не строго по очереди со слипом на весь таймаут."""
     if not await ensure_connected():
         await notify_admin('⚠️ Рассылка не запустилась: Pyrogram не подключён. Используй /login.')
         try:
@@ -444,6 +464,8 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
         return
 
     conn_failures = 0
+    roster = list(spam_list)
+    next_at: Dict[int, float] = {}
     try:
         while True:
             try:
@@ -456,24 +478,42 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                 break
 
             default_timeout = settings[5] if len(settings) > 5 else 5
+            try:
+                _dt = int(default_timeout)
+                default_timeout = _dt if _dt >= 1 else 5
+            except (TypeError, ValueError):
+                default_timeout = 5
 
-            # Обновляем доп. текст и отсев выключенных на каждой итерации
-            active_channels = []
-            for chat in spam_list:
-                try:
-                    if db.get_channel_spam_status(chat['id']) != 1:
-                        continue
-                    addit = db.get_additional_text(chat['id'])
-                    chat['text'] = addit[0] if addit and addit[0] else ''
-                    active_channels.append(chat)
-                except Exception as e:
-                    logger.error(f"Ошибка подготовки чата {chat.get('id')}: {e}")
+            # Освежаем ростер (get_chats кэшируется на 60с — дёшево)
+            try:
+                fresh = await get_chats()
+                if fresh:
+                    roster = fresh
+            except Exception as e:
+                logger.error(f"Ошибка обновления ростера: {e}")
+            roster_ids = {c['id'] for c in roster}
+            for k in [k for k in next_at if k not in roster_ids]:
+                del next_at[k]
 
-            if not active_channels:
-                await asyncio.sleep(30)
+            # Статусы одним запросом (fallback — поштучно для чужих реализаций db)
+            try:
+                rows = db.c.execute('SELECT CHANNEL, SPAM_ENABLED FROM CHANNELS').fetchall()
+                statuses = {int(r[0]): (r[1] or 0) for r in rows}
+            except Exception:
+                statuses = {}
+                for chat in roster:
+                    try:
+                        statuses[chat['id']] = db.get_channel_spam_status(chat['id'])
+                    except Exception:
+                        pass
+
+            now = _time.time()
+            due, wait = _plan_sends(roster, statuses, next_at, now)
+            if not due:
+                await asyncio.sleep(min(wait, POLL_STEP_SEC))
                 continue
 
-            for chat in active_channels:
+            for chat in due:
                 try:
                     settings = db.settings()
                 except Exception:
@@ -493,6 +533,14 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                     await asyncio.sleep(30)
                     break
                 conn_failures = 0
+
+                # Свежий доп. текст на каждую отправку
+                try:
+                    addit = db.get_additional_text(chat['id'])
+                    chat['text'] = addit[0] if addit and addit[0] else ''
+                except Exception as e:
+                    logger.error(f"Ошибка доп. текста {chat.get('id')}: {e}")
+                    chat['text'] = ''
 
                 try:
                     channel_post = db.get_channel_post(chat['id'])
@@ -515,7 +563,23 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                         elif settings[2]:
                             video_path = f"{config.DIR}{settings[2]}" if config.DIR else settings[2]
 
-                    ok, err = await _deliver(chat['id'], text, photo_path, video_path)
+                    # Индивидуальный таймаут чата, иначе глобальный
+                    try:
+                        per_chat = db.get_channel_timeout(chat['id'])
+                    except Exception:
+                        per_chat = None
+                    timeout = per_chat if per_chat and per_chat >= 1 else default_timeout
+
+                    try:
+                        ok, err = await _deliver(chat['id'], text, photo_path, video_path)
+                    except FloodWait as e:
+                        wait = int(getattr(e, 'value', 30) or 30)
+                        logger.warning(f"FloodWait {wait}s для {chat['id']}, повтор позже")
+                        register_send_result(db, chat['id'], False,
+                                             f'FloodWait {wait}s, повтор позже')
+                        next_at[chat['id']] = _time.time() + wait
+                        continue
+                    next_at[chat['id']] = _time.time() + timeout * 60
                     disabled = register_send_result(db, chat['id'], ok, err)
                     if not ok:
                         logger.error(f"Ошибка отправки в {chat['id']}: {err}")
@@ -523,26 +587,22 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                             await notify_admin(
                                 f'⛔ Чат {chat["id"]} выключен из рассылки: {err}')
                     else:
-                        logger.info(f"Отправлено в {chat['id']}")
-                        await _log_send(db, chat, text, photo_path, video_path)
+                        logger.info(f"Отправлено в {chat['id']}, следующее через {timeout} мин.")
+                        try:
+                            await _log_send(db, chat, text, photo_path, video_path)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as e:
+                            logger.warning(f"Лог не записался для {chat['id']}: {e}")
 
-                    # Индивидуальный таймаут чата, иначе глобальный
-                    try:
-                        per_chat = db.get_channel_timeout(chat['id'])
-                    except Exception:
-                        per_chat = None
-                    timeout = per_chat if per_chat and per_chat >= 1 else default_timeout
-                    await asyncio.sleep(timeout * 60)
+                    await asyncio.sleep(SEND_STAGGER_SEC)
 
-                except FloodWait as e:
-                    wait = int(getattr(e, 'value', 30) or 30)
-                    logger.warning(f"FloodWait {wait}s")
-                    await asyncio.sleep(wait)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
                     logger.error(f"Ошибка отправки в {chat['id']}: {e}")
                     register_send_result(db, chat['id'], False, str(e))
+                    next_at[chat['id']] = _time.time() + 60
                     await asyncio.sleep(10)
 
     except asyncio.CancelledError:

@@ -151,3 +151,29 @@ def test_send_state_line():
     assert '✅' in main._send_state_line(-1)
     user.send_status[-2] = {'ok': False, 'error': 'FLOOD', 'at': 0}
     assert '❌' in main._send_state_line(-2)
+
+
+def test_plan_sends_all_due_first_time():
+    roster = [{'id': -1}, {'id': -2}, {'id': -3}]
+    due, wait = user._plan_sends(roster, {-1: 1, -2: 1, -3: 1}, {}, 1000.0)
+    assert [c['id'] for c in due] == [-1, -2, -3]
+
+
+def test_plan_sends_respects_timers_and_filter():
+    roster = [{'id': -1}, {'id': -2}, {'id': -3}]
+    statuses = {-1: 1, -2: 1, -3: 0}
+    next_at = {-1: 900.0, -2: 5000.0}  # -1 просрочен, -2 в будущем, -3 выключен
+    due, wait = user._plan_sends(roster, statuses, next_at, 1000.0)
+    assert [c['id'] for c in due] == [-1]
+    assert wait == 4000.0  # просыпаемся к дедлайну -2
+
+
+def test_plan_sends_idle_wait():
+    due, wait = user._plan_sends([], {}, {}, 0.0)
+    assert due == [] and wait == user.POLL_STEP_SEC
+
+
+def test_plan_sends_unknown_chat_not_due():
+    # чата нет в статусах (нет в БД) — не шлём
+    due, _ = user._plan_sends([{'id': -9}], {}, {}, 0.0)
+    assert due == []
