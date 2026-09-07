@@ -45,53 +45,97 @@ def get_version():
 
 
 LOCK_FILE = 'bot.lock'
+_lock_fh = None
 
 
-def _pid_alive(pid: int) -> bool:
-    if pid == os.getpid():
-        return True
+def _lock_file(fh) -> None:
+    """Неблокирующая эксклюзивная блокировка 1 байта (Windows/posix)."""
+    if os.name == 'nt':
+        import msvcrt
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_file(fh) -> None:
+    if os.name == 'nt':
+        import msvcrt
+        try:
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+    else:
+        import fcntl
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def _lock_owner_hint() -> str:
+    # pid пишем со смещения 1: нулевой байт под локом читать нельзя
+    # (Windows запрещает чтение заблокированного диапазона даже нам).
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # чужой процесс, но живой
+        with open(LOCK_FILE, 'rb') as f:
+            f.seek(1)
+            pid = f.read().decode('utf-8', 'ignore').replace('\x00', '').strip()
+        if pid:
+            return f' (pid {pid})'
     except OSError:
-        return False
-    return True
+        pass
+    return ''
 
 
 def release_lock():
+    global _lock_fh
     try:
-        with open(LOCK_FILE, encoding='utf-8') as f:
-            owner = f.read().strip()
-        if owner == str(os.getpid()) and os.path.exists(LOCK_FILE):
-            os.remove(LOCK_FILE)
-    except OSError:
-        pass
+        if _lock_fh is not None:
+            try:
+                _unlock_file(_lock_fh)
+            except OSError:
+                pass
+            try:
+                _lock_fh.close()
+            except OSError:
+                pass
+    finally:
+        _lock_fh = None
 
 
 def acquire_lock() -> bool:
-    """Не даём запустить второго бота: два инстанса отбирают друг у друга
-    обновления и команды 'не работают'. Протухший lock битого процесса
-    перезаписываем."""
+    """Только один экземпляр: два процесса делят обновления и команды молчат.
+
+    Блокировка держится ОТКРЫТЫМ хендлом файла и умирает вместе с процессом —
+    протухнуть не может (в отличие от проверки PID: в Windows PID
+    переиспользуются и старт может блокироваться из-за чужого процесса).
+    """
+    global _lock_fh
     import atexit
-    if os.path.exists(LOCK_FILE):
-        try:
-            with open(LOCK_FILE, encoding='utf-8') as f:
-                old = int(f.read().strip())
-        except (ValueError, OSError):
-            old = 0
-        if old and _pid_alive(old):
-            logger.error(f'Бот уже запущен (pid {old}). Останови дубль — '
-                         f'иначе обновления делят два процесса и команды молчат.')
-            return False
     try:
-        with open(LOCK_FILE, 'w', encoding='utf-8') as f:
-            f.write(str(os.getpid()))
+        _lock_fh = open(LOCK_FILE, 'a+b')
     except OSError as e:
-        logger.error(f'Не смог записать lock-файл: {e}')
+        logger.error(f'Не смог открыть lock-файл: {e}')
         return False
+    try:
+        _lock_file(_lock_fh)
+    except OSError:
+        try:
+            _lock_fh.close()
+        except OSError:
+            pass
+        _lock_fh = None
+        logger.error(f'Бот уже запущен{_lock_owner_hint()}. Останови дубль '
+                     f'(второе окно start.bat / процесс python main.py) — иначе '
+                     f'обновления делят два процесса и команды молчат.')
+        return False
+    try:
+        # pid — со смещения 1, нулевой байт занят локом (его нельзя читать)
+        _lock_fh.seek(1)
+        _lock_fh.truncate()
+        _lock_fh.write(str(os.getpid()).encode('utf-8'))
+        _lock_fh.flush()
+    except OSError:
+        pass
     atexit.register(release_lock)
     return True
 
