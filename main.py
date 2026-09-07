@@ -154,8 +154,86 @@ user.init_bot(bot)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Гасим шум pyrogram (коннекты/пинги) — свои события логируем сами
+for _noisy in ('pyrogram.connection', 'pyrogram.session', 'pyrogram.dispatcher'):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 # Активная задача спам-цикла (чтобы не плодить дубликаты)
 spam_task: asyncio.Task | None = None
+
+POLL_RETRY_SEC = 30  # пауза перед повтором поллинга при обрыве сети
+
+# Итоги старта для отчёта админу
+startup_info: dict = {'spam_was': False, 'resumed': 0, 'pyro_ok': False}
+_wd_started = False
+
+
+def _build_startup_report() -> str:
+    lines = [f'🚀 <b>Бот запущен</b> · v{get_version()}']
+    if startup_info.get('spam_was'):
+        n = startup_info.get('resumed', 0)
+        if n:
+            lines.append(f'📝 Рассылка была ВКЛ → возобновлена ({n} чатов)')
+        else:
+            lines.append('📝 Рассылка была ВКЛ → сразу возобновить не вышло, '
+                         'watchdog поднимет её сам')
+    else:
+        lines.append('📝 Рассылка была ВЫКЛ')
+    if startup_info.get('pyro_ok'):
+        lines.append('📡 Pyrogram: ✅ подключён')
+    else:
+        lines.append('📡 Pyrogram: ❌ нет — нужен /login или жду сеть')
+    return '\n'.join(lines)
+
+
+@dp.startup()
+async def on_startup(bot: Bot):
+    try:
+        await bot.send_message(config.ADMINS[0], _build_startup_report())
+    except Exception as e:
+        logger.error(f'Не смог отправить стартовый отчёт: {e}')
+
+
+def _watchdog_should_start(spam_flag: int, task) -> bool:
+    return spam_flag == 1 and (task is None or task.done())
+
+
+async def _spam_watchdog():
+    """Раз в минуту проверяет: флаг ВКЛ, а цикл мёртв — поднимает заново.
+    Так рассылка самовосстанавливается после обрывов сети/перезапусков."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            st = db.settings()
+            flag = st[4] if st else 0
+        except Exception as e:
+            logger.error(f'Watchdog: не прочитал настройки: {e}')
+            continue
+        try:
+            global spam_task
+            if _watchdog_should_start(flag, spam_task):
+                logger.info('Watchdog: перезапускаю цикл рассылки')
+                await start_spam_loop()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f'Watchdog: {e}')
+
+
+async def _run_polling():
+    """Поллинг с ретраями: при обрыве сети ждём и пробуем снова,
+    а не падаем с трейсбеком."""
+    while True:
+        try:
+            await dp.start_polling(bot)
+            return
+        except TelegramConflictError:
+            logger.error('Telegram Conflict: токен опрашивает ДРУГОЙ процесс. '
+                         'Останови дубль.')
+            raise
+        except TelegramNetworkError as e:
+            logger.error(f'Нет связи с Telegram ({e}). Повтор через {POLL_RETRY_SEC}с…')
+            await asyncio.sleep(POLL_RETRY_SEC)
 
 MEDIA_DIR = getattr(config, 'DIR', '') or ''
 if MEDIA_DIR:
@@ -1964,8 +2042,18 @@ async def start_spam_loop() -> int:
         except asyncio.CancelledError:
             pass
     if not await user.ensure_connected():
-        await bot.send_message(config.ADMINS[0], 'Pyrogram не подключен. Используй /login')
-        db.setSpam(0)
+        has_session = os.path.exists('session.session')
+        try:
+            await bot.send_message(
+                config.ADMINS[0],
+                'Pyrogram не подключен. Используй /login' if not has_session
+                else '⚠️ Нет соединения с Telegram — рассылка подождёт сеть и стартует сама.')
+        except Exception:
+            pass
+        if not has_session:
+            # сессии нет вообще — включать нечего
+            db.setSpam(0)
+        # при обрыве сети флаг НЕ гасим: watchdog поднимет цикл позже
         return 0
     chats = await user.get_chats()
     # Фильтруем только включённые в БД
@@ -1982,6 +2070,7 @@ async def start_spam_loop() -> int:
 
 
 async def main():
+    global _wd_started
     logger.info(f"Autoposter {get_version()} стартует. Админы: {config.ADMINS}")
     try:
         st = db.settings()
@@ -1991,20 +2080,20 @@ async def main():
         logger.error(f"Не смог прочитать настройки: {e}")
     # Запускаем Pyrogram клиент при старте
     connected = await user.start_client()
+    startup_info['pyro_ok'] = connected
     if not connected:
         logger.warning("Pyrogram не подключен. Используй /login для входа.")
     # Если спам был включён до перезапуска — возобновляем
     try:
         if db.settings()[4] == 1:
-            await start_spam_loop()
+            startup_info['spam_was'] = True
+            startup_info['resumed'] = await start_spam_loop()
     except Exception as e:
         logger.error(f"Ошибка автовозобновления спама: {e}")
-    try:
-        await dp.start_polling(bot)
-    except TelegramConflictError:
-        logger.error("Telegram Conflict: этот же токен уже опрашивает ДРУГОЙ запущенный "
-                     "экземпляр бота. Симптом — команды 'не работают'. Останови дубль.")
-        raise
+    if not _wd_started:
+        _wd_started = True
+        asyncio.create_task(_spam_watchdog(), name='spam-watchdog')
+    await _run_polling()
 
 
 @dp.error()

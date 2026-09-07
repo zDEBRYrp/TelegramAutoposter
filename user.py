@@ -456,11 +456,16 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
     """Рассылка с независимыми таймерами: каждый чат шлётся по своему
     интервалу, а не строго по очереди со слипом на весь таймаут."""
     if not await ensure_connected():
-        await notify_admin('⚠️ Рассылка не запустилась: Pyrogram не подключён. Используй /login.')
-        try:
-            db.setSpam(0)
-        except Exception:
-            pass
+        has_session = os.path.exists("session.session")
+        if not has_session:
+            await notify_admin('⚠️ Рассылка не запустилась: Pyrogram не подключён. Используй /login.')
+            try:
+                db.setSpam(0)
+            except Exception:
+                pass
+        else:
+            # сеть упала, сессия есть — флаг не гасим, watchdog перезапустит
+            await notify_admin('⚠️ Рассылка ждёт сеть: соединение потеряно, продолжу автоматически.')
         return
 
     conn_failures = 0

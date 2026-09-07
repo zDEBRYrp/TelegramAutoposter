@@ -20,7 +20,7 @@ def test_error_handler_registered():
 
 
 def test_main_handles_polling_conflict():
-    src = inspect.getsource(main.main)
+    src = inspect.getsource(main._run_polling)
     assert 'TelegramConflictError' in src
 
 
