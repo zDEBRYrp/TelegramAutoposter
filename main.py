@@ -324,12 +324,58 @@ def back_to_global_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text='⬅️ К посту', callback_data='BACK_TO_GLOBAL')]])
 
 
+def back_to_settings_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='⬅️ К настройкам', callback_data='SETTINGS_BACK')]])
+
+
+def build_settings_card() -> tuple[str, InlineKeyboardMarkup]:
+    """Карточка ⚙️ Настройки: тумблеры + массовые действия."""
+    try:
+        log_on, log_chat = db.get_log_config()
+    except Exception:
+        log_on, log_chat = 0, ''
+    try:
+        report_on = db.get_report_enabled()
+    except Exception:
+        report_on = 1
+    try:
+        all_chats = db.c.execute('SELECT COUNT(*), COALESCE(SUM(SPAM_ENABLED), 0) FROM CHANNELS').fetchone()
+        total, active = (all_chats[0] or 0), (all_chats[1] or 0)
+    except Exception:
+        total, active = 0, 0
+
+    log_target = _display(str(log_chat), 24) if log_chat else '— не выбран —'
+    lines = [
+        '<b>⚙️ Настройки</b>',
+        f'📤 Лог отправок: {"✅ вкл" if log_on else "⬜ выкл"} → {log_target}',
+        f'📊 Отчёт о старте: {"✅ вкл" if report_on else "⬜ выкл"}',
+        f'💬 Чаты: {active} активно из {total}',
+    ]
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f'📤 Лог отправок: {"✅" if log_on else "⬜"}',
+            callback_data='SET_TOGGLE_LOG')],
+        [InlineKeyboardButton(text=f'📋 Лог-чат: {log_target}', callback_data='SET_LOG_CHAT')],
+        [InlineKeyboardButton(
+            text=f'📊 Отчёт о старте: {"✅" if report_on else "⬜"}',
+            callback_data='SET_TOGGLE_REPORT')],
+        [InlineKeyboardButton(text='✅ Включить все', callback_data='SET_ALL_ON'),
+         InlineKeyboardButton(text='⛔ Выключить все', callback_data='SET_ALL_OFF')],
+        [InlineKeyboardButton(text='♻️ Обновить список чатов', callback_data='SET_REFRESH_CHATS'),
+         InlineKeyboardButton(text='🧹 Сбросить статусы', callback_data='SET_CLEAR_STATUS')],
+        [InlineKeyboardButton(text='❌ Закрыть', callback_data='SETTINGS_CLOSE')],
+    ])
+    return '\n'.join(lines), kb
+
+
 # --- Подписи reply-кнопок (единый источник правды: меню и хендлеры используют их) ---
 BTN_START = '▶️ Запустить рассылку'
 BTN_STOP = '⏹ Остановить рассылку'
 BTN_POST = '📝 Общий пост'
 BTN_CHATS = '💬 Чаты'
 BTN_CPOSTS = '📢 Посты чатов'
+BTN_SETTINGS = '⚙️ Настройки'
 BTN_INFO = 'ℹ️ Инфо'
 BTN_UPDATE = '🔄 Обновление'
 BTN_HOME = '🏠 Главное меню'
@@ -341,8 +387,8 @@ def welcome_keyboard():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text=BTN_START)],
         [KeyboardButton(text=BTN_POST), KeyboardButton(text=BTN_CHATS)],
-        [KeyboardButton(text=BTN_CPOSTS), KeyboardButton(text=BTN_INFO)],
-        [KeyboardButton(text=BTN_UPDATE)]
+        [KeyboardButton(text=BTN_CPOSTS), KeyboardButton(text=BTN_SETTINGS)],
+        [KeyboardButton(text=BTN_INFO), KeyboardButton(text=BTN_UPDATE)]
     ], resize_keyboard=True)
 
 
@@ -350,7 +396,8 @@ def spam_running_keyboard():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text=BTN_STOP)],
         [KeyboardButton(text=BTN_POST), KeyboardButton(text=BTN_CHATS)],
-        [KeyboardButton(text=BTN_CPOSTS), KeyboardButton(text=BTN_INFO)]
+        [KeyboardButton(text=BTN_CPOSTS), KeyboardButton(text=BTN_SETTINGS)],
+        [KeyboardButton(text=BTN_INFO)]
     ], resize_keyboard=True)
 
 
@@ -600,6 +647,10 @@ class add_chat_state(StatesGroup):
     link = State()
 
 
+class settings_state(StatesGroup):
+    log_chat = State()
+
+
 @router.message(Command("start"))
 async def process_start_command(m: Message):
     if m.chat.type != 'private':
@@ -618,6 +669,7 @@ HELP_TEXT = (
     "• 📝 Общий пост — текст + фото/видео для всех чатов\n"
     "• 💬 Чаты — вкл/выкл, свой интервал, свой пост и доп. текст\n"
     "• 📢 Посты чатов — у кого задан свой пост\n"
+    "• ⚙️ Настройки — лог отправок, отчёты, вкл/выкл всех чатов\n"
     "• 🔄 Обновление — новая версия с GitHub\n\n"
     "<b>Команды:</b> /start /help /login /update /cancel"
 )
@@ -791,9 +843,16 @@ async def start_spam_cmd(message: Message):
         return
     if not enabled:
         return  # причина уже отправлена админу из start_spam_loop
+    try:
+        report_on = db.get_report_enabled() == 1
+    except Exception:
+        report_on = True
     sent = await message.answer(
-        f'🚀 Рассылка запущена! Чатов: {enabled}.\n⏳ Проверяю первую отправку…',
+        f'🚀 Рассылка запущена! Чатов: {enabled}.' +
+        ('\n⏳ Проверяю первую отправку…' if report_on else ''),
         reply_markup=spam_running_keyboard())
+    if not report_on:
+        return
     try:
         ids = [ch['id'] for ch in await user.get_chats()
                if db.get_channel_spam_status(ch['id']) == 1]
@@ -837,6 +896,14 @@ async def add_channel_post_hint(message: Message):
     await message.answer(
         'Индивидуальный пост задаётся для конкретного чата:\n'
         '💬 Чаты → ⚙️ → 📝 Пост чата → Текст/Фото/Видео.')
+
+@router.message(F.text == BTN_SETTINGS)
+async def settings_menu(message: Message):
+    if await _deny_if_not_admin(message):
+        return
+    await _clean_trigger(message)
+    text, kb = build_settings_card()
+    await message.answer(text, reply_markup=kb)
 
 @router.message(F.text == BTN_CLIST)
 async def list_channel_posts(message: Message):
@@ -1295,6 +1362,86 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
                 pass
         await c.answer()
 
+    elif data == 'SET_TOGGLE_LOG':
+        cur_on, _ = db.get_log_config()
+        db.set_log_enabled(0 if cur_on else 1)
+        text, kb = build_settings_card()
+        try:
+            await c.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+        await c.answer('📤 Лог выключен' if cur_on else '📤 Лог включён')
+
+    elif data == 'SET_TOGGLE_REPORT':
+        cur = db.get_report_enabled()
+        db.set_report_enabled(0 if cur else 1)
+        text, kb = build_settings_card()
+        try:
+            await c.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+        await c.answer('📊 Отчёт выключен' if cur else '📊 Отчёт включён')
+
+    elif data == 'SET_LOG_CHAT':
+        await state.set_data({'prompt_id': c.message.message_id})
+        await c.message.edit_text(
+            '📋 Перешли сюда любое сообщение из канала/чата для лога — возьму его ID.\n'
+            'Либо отправь ID (-100...) или @username.\n\n/cancel — отмена.',
+            reply_markup=back_to_settings_kb())
+        await state.set_state(settings_state.log_chat)
+        await c.answer()
+
+    elif data == 'SET_ALL_ON':
+        n = db.set_all_channels(1)
+        text, kb = build_settings_card()
+        try:
+            await c.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+        await c.answer(f'✅ Включено чатов: {n}')
+
+    elif data == 'SET_ALL_OFF':
+        n = db.set_all_channels(0)
+        text, kb = build_settings_card()
+        try:
+            await c.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+        await c.answer(f'⛔ Выключено чатов: {n}')
+
+    elif data == 'SET_REFRESH_CHATS':
+        chats = await user.get_chats(force=True)
+        text, kb = build_settings_card()
+        try:
+            await c.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+        await c.answer(f'♻️ Список обновлён: {len(chats)}')
+
+    elif data == 'SET_CLEAR_STATUS':
+        user.send_status.clear()
+        text, kb = build_settings_card()
+        try:
+            await c.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+        await c.answer('🧹 Статусы отправок сброшены')
+
+    elif data == 'SETTINGS_BACK':
+        text, kb = build_settings_card()
+        try:
+            await c.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+        await c.answer()
+
+    elif data == 'SETTINGS_CLOSE':
+        try:
+            await c.message.delete()
+        except Exception:
+            pass
+        await c.answer()
+
     elif data == 'INTERVAL':
         settings = db.settings()
         await state.set_data({'prompt_id': c.message.message_id})
@@ -1414,6 +1561,51 @@ async def input_chat_link(m: Message, state: FSMContext):
     await _edit_or_send(m.chat.id, prompt,
                         f'✅ Чат {html.escape(chat.title or match.group(1))} (ID: {chat.id}) добавлен!',
                         back_to_chats_kb())
+    await state.clear()
+
+
+@router.message(settings_state.log_chat)
+async def input_log_chat(m: Message, state: FSMContext):
+    if await _deny_if_not_admin(m):
+        await state.clear()
+        return
+    prompt = await _prompt_id(state)
+    await _clean_trigger(m)
+    dest = None
+    fwd = m.forward_from_chat
+    if fwd is not None:
+        dest = fwd.id
+    else:
+        raw = (m.text or '').strip()
+        if not raw:
+            await _edit_or_send(m.chat.id, prompt,
+                                '❌ Перешли сообщение из лог-канала или отправь ID/@username.')
+            return
+        if re.fullmatch(r'-?\d+', raw):
+            dest = int(raw)
+        else:
+            mm = re.search(r't\.me/(?:joinchat/|[+])?([a-zA-Z0-9_]+)', raw)
+            uname = ('@' + mm.group(1)) if mm else raw
+            if not uname.startswith('@'):
+                uname = '@' + uname.lstrip('@')
+            dest = uname
+    if not await user.ensure_connected():
+        await _edit_or_send(m.chat.id, prompt,
+                            'Pyrogram не подключен. Используй /login',
+                            back_to_settings_kb())
+        await state.clear()
+        return
+    try:
+        await user.client.send_message(dest, '✅ Лог отправок подключён: сюда будут падать копии постов.')
+    except Exception as e:
+        await _edit_or_send(m.chat.id, prompt,
+                            f'❌ Не смог написать туда: {html.escape(str(e))}\n'
+                            f'Проверь что аккаунт участник чата и попробуй снова.')
+        return
+    db.set_log_chat(dest)
+    db.set_log_enabled(1)
+    text, kb = build_settings_card()
+    await _edit_or_send(m.chat.id, prompt, f'✅ Лог-чат подключён!\n\n{text}', kb)
     await state.clear()
 
 

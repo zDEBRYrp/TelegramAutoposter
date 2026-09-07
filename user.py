@@ -404,6 +404,36 @@ async def _deliver(chat_id: int, text: str,
         return False, str(e)
 
 
+async def _log_send(db, chat: Dict[str, Any], text: str,
+                    photo_path: str = None, video_path: str = None) -> None:
+    """Копия отправленного поста в лог-чат (если включён).
+    Никогда не роняет цикл рассылки."""
+    try:
+        enabled, target = db.get_log_config()
+    except Exception:
+        return
+    if not enabled or not target:
+        return
+    try:
+        dest = int(str(target).strip())
+    except (ValueError, TypeError):
+        dest = str(target).strip()
+    if not dest:
+        return
+    from pyrogram.enums import ParseMode as PyroParseMode
+    title = chat.get('title') or str(chat.get('id'))
+    import html as _hmod
+    header = (f'📤 <code>{chat.get("id")}</code> {_hmod.escape(str(title))} · '
+              f'{_time.strftime("%H:%M", _time.localtime(_time.time()))}')
+    try:
+        await client.send_message(dest, header, parse_mode=PyroParseMode.HTML)
+        await _send_with_fallback(dest, text, photo_path=photo_path, video_path=video_path)
+    except (FloodWait, asyncio.CancelledError):
+        raise
+    except Exception as e:
+        logger.warning(f"Не смог записать в лог-чат {dest}: {e}")
+
+
 async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None:
     if not await ensure_connected():
         await notify_admin('⚠️ Рассылка не запустилась: Pyrogram не подключён. Используй /login.')
@@ -494,6 +524,7 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                                 f'⛔ Чат {chat["id"]} выключен из рассылки: {err}')
                     else:
                         logger.info(f"Отправлено в {chat['id']}")
+                        await _log_send(db, chat, text, photo_path, video_path)
 
                     # Индивидуальный таймаут чата, иначе глобальный
                     try:

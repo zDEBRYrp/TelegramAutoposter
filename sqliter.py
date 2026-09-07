@@ -240,6 +240,11 @@ class DBConnection(object):
                     POST_TEXT TEXT DEFAULT ''
                 )
             ''')
+
+            # Миграции старых баз: докладываем колонки, которых не было
+            self._ensure_column('SETTINGS', 'LOG_ENABLED', 'INTEGER DEFAULT 0')
+            self._ensure_column('SETTINGS', 'LOG_CHAT', "TEXT DEFAULT ''")
+            self._ensure_column('SETTINGS', 'REPORT_ENABLED', 'INTEGER DEFAULT 1')
             
             self.c.execute('SELECT * FROM SETTINGS WHERE ID = 1')
             if self.c.fetchone() is None:
@@ -252,6 +257,16 @@ class DBConnection(object):
         except Exception as e:
             logger.error(f"Ошибка инициализации БД: {e}")
             raise
+
+    def _ensure_column(self, table: str, column: str, ddl: str) -> None:
+        try:
+            cols = [r[1] for r in self.c.execute(f'PRAGMA table_info({table})').fetchall()]
+            if column not in cols:
+                self.c.execute(f'ALTER TABLE {table} ADD COLUMN {column} {ddl}')
+                self.conn.commit()
+                logger.info(f"Миграция БД: {table}.{column} добавлена")
+        except Exception as e:
+            logger.error(f"Ошибка миграции {table}.{column}: {e}")
     
     def add_additional_text(self, channel_id: int, text: str) -> bool:
         try:
@@ -350,6 +365,65 @@ class DBConnection(object):
         except Exception as e:
             logger.error(f"Ошибка изменения таймаута: {e}")
             return False
+
+    def get_log_config(self) -> Tuple[int, str]:
+        """(LOG_ENABLED 0/1, LOG_CHAT id-or-username)."""
+        try:
+            self.c.execute('SELECT LOG_ENABLED, LOG_CHAT FROM SETTINGS WHERE ID = ?', [1])
+            row = self.c.fetchone()
+            if not row:
+                return 0, ''
+            return (row[0] or 0), (row[1] or '')
+        except Exception as e:
+            logger.error(f"Ошибка чтения лог-конфига: {e}")
+            return 0, ''
+
+    def set_log_enabled(self, enabled: int) -> bool:
+        try:
+            self.c.execute('UPDATE SETTINGS SET LOG_ENABLED = ? WHERE ID = ?', [1 if enabled else 0, 1])
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка переключения лога: {e}")
+            return False
+
+    def set_log_chat(self, chat: str) -> bool:
+        try:
+            self.c.execute('UPDATE SETTINGS SET LOG_CHAT = ? WHERE ID = ?', [str(chat or ''), 1])
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка установки лог-чата: {e}")
+            return False
+
+    def get_report_enabled(self) -> int:
+        try:
+            self.c.execute('SELECT REPORT_ENABLED FROM SETTINGS WHERE ID = ?', [1])
+            row = self.c.fetchone()
+            return 1 if not row or row[0] is None else int(row[0])
+        except Exception as e:
+            logger.error(f"Ошибка чтения флага отчёта: {e}")
+            return 1
+
+    def set_report_enabled(self, enabled: int) -> bool:
+        try:
+            self.c.execute('UPDATE SETTINGS SET REPORT_ENABLED = ? WHERE ID = ?', [1 if enabled else 0, 1])
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка переключения отчёта: {e}")
+            return False
+
+    def set_all_channels(self, enabled: int) -> int:
+        """Вкл/выкл все чаты разом. Возвращает число затронутых."""
+        try:
+            self.c.execute('UPDATE CHANNELS SET SPAM_ENABLED = ?', [1 if enabled else 0])
+            n = self.c.rowcount if self.c.rowcount is not None and self.c.rowcount >= 0 else 0
+            self.conn.commit()
+            return n
+        except Exception as e:
+            logger.error(f"Ошибка массового переключения чатов: {e}")
+            return 0
     
     def stop_spam_for_channel(self, channel_id: int) -> bool:
         try:
