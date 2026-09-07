@@ -100,3 +100,17 @@ def test_input_prompts_store_prompt_id():
                    'INPUT_CHAT_ID', 'INPUT_CHAT_USERNAME', 'INPUT_CHAT_LINK'):
         assert branch in src
     assert src.count("'prompt_id'") >= 8
+
+
+def test_save_telegram_file_works(monkeypatch, tmp_path):
+    import asyncio
+
+    class B:
+        async def download(self, file_id, destination=None):
+            with open(destination, 'w') as f:
+                f.write('x')
+
+    monkeypatch.setattr(main, 'bot', B())
+    monkeypatch.setattr(main, 'MEDIA_DIR', str(tmp_path))
+    name = asyncio.run(main.save_telegram_file('abc123', 'global', '.jpg'))
+    assert name.endswith('.jpg') and (tmp_path / name).exists()

@@ -16,6 +16,7 @@ import asyncio
 import logging
 import os
 import re
+import time as _time
 
 import config
 import user
@@ -156,7 +157,7 @@ async def save_telegram_file(file_id: str, prefix: str, ext: str) -> str:
     import time
     dest_dir = MEDIA_DIR or 'photos'
     os.makedirs(dest_dir, exist_ok=True)
-    filename = f"{prefix}_{int(time.time())}_{file_id[-8:]}{ext}"
+    filename = f"{prefix}_{int(_time.time())}_{file_id[-8:]}{ext}"
     dest = os.path.join(dest_dir, filename)
     await bot.download(file_id, destination=dest)
     return filename
@@ -309,6 +310,59 @@ def spam_running_keyboard():
     ], resize_keyboard=True)
 
 
+def _send_state_line(chat_id: int) -> str:
+    """Строка последней отправки для карточек: ✅/❌ + время."""
+    st = user.send_status.get(chat_id)
+    if not st:
+        return '📤 Отправок ещё не было'
+    when = _time.strftime('%H:%M', _time.localtime(st.get('at', 0)))
+    if st.get('ok'):
+        return f'📤 Последняя: ✅ {when}'
+    err = _short(st.get('error') or 'ошибка', 50)
+    dis = ', чат выключен' if st.get('disabled') else ''
+    return f'📤 Последняя: ❌ {when} ({html.escape(err)}{dis})'
+
+
+def _format_send_report(results: dict) -> str:
+    """Отчёт о первых отправках после старта рассылки."""
+    lines = ['📡 <b>Первые отправки:</b>']
+    pending = [cid for cid, st in results.items() if not st]
+    for cid, st in sorted(results.items()):
+        if not st:
+            continue
+        if st.get('ok'):
+            lines.append(f'✅ {cid}')
+        else:
+            err = _short(st.get('error') or 'ошибка', 60)
+            dis = ' → чат выключен' if st.get('disabled') else ''
+            lines.append(f'❌ {cid} — {html.escape(err)}{dis}')
+    if pending:
+        lines.append(f'⏳ Ещё ждут: {len(pending)} (смотрятся в ℹ️ Инфо)')
+    if len(lines) == 1:
+        return '⏳ Первые отправки ещё идут — итог появится в ℹ️ Инфо.'
+    return '\n'.join(lines)
+
+
+async def _report_first_sends(chat_id: int, msg_id: int, ids: list, timeout: int = 120):
+    """Ждём первые итоги отправки и правим стартовое сообщение отчётом."""
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        if all(i in user.send_status for i in ids):
+            break
+        try:
+            if db.settings()[4] != 1:
+                break  # рассылку остановили — нечего ждать
+        except Exception:
+            pass
+        await asyncio.sleep(5)
+    try:
+        await bot.edit_message_text(
+            _format_send_report({i: user.send_status.get(i) for i in ids}),
+            chat_id, msg_id, parse_mode=ParseMode.HTML)
+    except Exception:
+        pass
+
+
 def channel_post_keyboard():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text=BTN_CLIST), KeyboardButton(text=BTN_CADD)],
@@ -366,7 +420,8 @@ def format_chat_info(chat_id: int) -> str:
             f'{"✅ Рассылка включена" if spam_status == 1 else "⬜ Рассылка выключена"}\n'
             f'⏱ Интервал: {timeout_val} мин.\n'
             f'💬 Доп. текст: {addit_val}\n'
-            f'📝 Пост: {post_desc}')
+            f'📝 Пост: {post_desc}\n'
+            f'{_send_state_line(chat_id)}')
 
 
 CHAT_FILTERS = ('all', 'on', 'off')
@@ -587,11 +642,24 @@ async def send_info(message: Message):
         total, active = (all_chats[0] or 0), (all_chats[1] or 0)
     except Exception:
         total, active = 0, 0
+    send_lines = ''
+    if user.send_status:
+        rows = []
+        for cid, st in sorted(user.send_status.items()):
+            mark = '✅' if st.get('ok') else '❌'
+            when = _time.strftime('%H:%M', _time.localtime(st.get('at', 0)))
+            extra = '' if st.get('ok') else f' ({html.escape(_short(st.get("error") or "ошибка", 30))})'
+            rows.append(f'{mark} {cid} · {when}{extra}')
+        shown = rows[:8]
+        send_lines = '\n📤 Отправки:\n' + '\n'.join(shown)
+        if len(rows) > 8:
+            send_lines += f'\n… и ещё {len(rows) - 8}'
     await message.answer(
         f'ℹ️ <b>Autoposter {version}</b>\n'
         f'Обновление: {upd}\n'
         f'📝 Рассылка: {"✅ запущена" if spam == 1 else "⬜ остановлена"}\n'
-        f'💬 Чаты: {active} активно из {total}\n\nSupport: @support')
+        f'💬 Чаты: {active} активно из {total}'
+        f'{send_lines}\n\nSupport: @support')
 
 @router.message(F.text == BTN_UPDATE)
 async def update_btn(message: Message):
@@ -660,11 +728,25 @@ async def start_spam_cmd(message: Message):
         return
     await _clean_trigger(message)
     db.setSpam(1)
-    enabled = await start_spam_loop()
-    if enabled:
-        await message.answer(f'✅ Рассылка запущена! Активных чатов: {enabled}.',
-                             reply_markup=spam_running_keyboard())
-    # если чатов нет — start_spam_loop уже сообщил причину и выключил спам
+    try:
+        enabled = await start_spam_loop()
+    except Exception as e:
+        logger.exception('start_spam_loop упал')
+        db.setSpam(0)
+        await message.answer(f'❌ Рассылка не запустилась: {e}',
+                             reply_markup=welcome_keyboard())
+        return
+    if not enabled:
+        return  # причина уже отправлена админу из start_spam_loop
+    sent = await message.answer(
+        f'🚀 Рассылка запущена! Чатов: {enabled}.\n⏳ Проверяю первую отправку…',
+        reply_markup=spam_running_keyboard())
+    try:
+        ids = [ch['id'] for ch in await user.get_chats()
+               if db.get_channel_spam_status(ch['id']) == 1]
+    except Exception:
+        ids = []
+    asyncio.create_task(_report_first_sends(message.chat.id, sent.message_id, ids))
 
 @router.message(F.text == BTN_STOP)
 async def stop_spam_cmd(message: Message):
