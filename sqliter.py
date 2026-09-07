@@ -245,6 +245,7 @@ class DBConnection(object):
             self._ensure_column('SETTINGS', 'LOG_ENABLED', 'INTEGER DEFAULT 0')
             self._ensure_column('SETTINGS', 'LOG_CHAT', "TEXT DEFAULT ''")
             self._ensure_column('SETTINGS', 'REPORT_ENABLED', 'INTEGER DEFAULT 1')
+            self._ensure_column('CHANNELS', 'SEND_NEXT', 'REAL DEFAULT 0')
             
             self.c.execute('SELECT * FROM SETTINGS WHERE ID = 1')
             if self.c.fetchone() is None:
@@ -424,6 +425,28 @@ class DBConnection(object):
         except Exception as e:
             logger.error(f"Ошибка массового переключения чатов: {e}")
             return 0
+
+    def get_send_next(self, channel_id: int) -> float:
+        """Когда чату пора слать следующий пост (unix time, 0 = сразу)."""
+        try:
+            self.c.execute('SELECT SEND_NEXT FROM CHANNELS WHERE CHANNEL = ?', [str(channel_id)])
+            row = self.c.fetchone()
+            if not row or row[0] is None:
+                return 0.0
+            return float(row[0])
+        except Exception as e:
+            logger.error(f"Ошибка чтения расписания: {e}")
+            return 0.0
+
+    def set_send_next(self, channel_id: int, ts: float) -> bool:
+        try:
+            self.c.execute('UPDATE CHANNELS SET SEND_NEXT = ? WHERE CHANNEL = ?',
+                           [float(ts), str(channel_id)])
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка записи расписания: {e}")
+            return False
     
     def stop_spam_for_channel(self, channel_id: int) -> bool:
         try:

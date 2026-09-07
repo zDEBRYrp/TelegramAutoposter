@@ -438,6 +438,35 @@ SEND_STAGGER_SEC = 5  # пауза между отправками в РАЗНЫ
 POLL_STEP_SEC = 15  # гранулярность проверки флага/расписания
 
 
+def load_schedule(db, ids) -> Dict[int, float]:
+    """Расписание из БД (переживает перезапуск). Нет данных = слать сразу."""
+    ids = set(ids)
+    try:
+        rows = db.c.execute('SELECT CHANNEL, SEND_NEXT FROM CHANNELS').fetchall()
+        return {int(r[0]): float(r[1] or 0) for r in rows if int(r[0]) in ids}
+    except Exception:
+        pass
+    sched: Dict[int, float] = {}
+    get = getattr(db, 'get_send_next', None)
+    if get:
+        for cid in ids:
+            try:
+                sched[cid] = float(get(cid) or 0)
+            except Exception:
+                pass
+    return sched
+
+
+def save_schedule(db, chat_id: int, ts: float) -> None:
+    """Сохранить следующий дедлайн чата (best effort)."""
+    try:
+        setter = getattr(db, 'set_send_next', None)
+        if setter:
+            setter(chat_id, ts)
+    except Exception as e:
+        logger.error(f"Не сохранил расписание {chat_id}: {e}")
+
+
 def _plan_sends(roster, statuses, next_at, now):
     """Чистая функция планировщика.
 
@@ -470,7 +499,9 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
 
     conn_failures = 0
     roster = list(spam_list)
-    next_at: Dict[int, float] = {}
+    next_at: Dict[int, float] = load_schedule(db, [c['id'] for c in roster])
+    if next_at:
+        logger.info(f"Расписание восстановлено из БД для {len(next_at)} чатов")
     try:
         while True:
             try:
@@ -583,8 +614,10 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                         register_send_result(db, chat['id'], False,
                                              f'FloodWait {wait}s, повтор позже')
                         next_at[chat['id']] = _time.time() + wait
+                        save_schedule(db, chat['id'], next_at[chat['id']])
                         continue
                     next_at[chat['id']] = _time.time() + timeout * 60
+                    save_schedule(db, chat['id'], next_at[chat['id']])
                     disabled = register_send_result(db, chat['id'], ok, err)
                     if not ok:
                         logger.error(f"Ошибка отправки в {chat['id']}: {err}")
@@ -608,6 +641,7 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                     logger.error(f"Ошибка отправки в {chat['id']}: {e}")
                     register_send_result(db, chat['id'], False, str(e))
                     next_at[chat['id']] = _time.time() + 60
+                    save_schedule(db, chat['id'], next_at[chat['id']])
                     await asyncio.sleep(10)
 
     except asyncio.CancelledError:

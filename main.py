@@ -1470,6 +1470,23 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         await c.answer()
 
     elif data == 'SET_ALL_ON':
+        try:
+            total = db.c.execute('SELECT COUNT(*) FROM CHANNELS').fetchone()[0] or 0
+        except Exception:
+            total = 0
+        try:
+            await c.message.edit_text(
+                f'Включить рассылку сразу во <b>все {total}</b> чатов?',
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text='✅ Да, включить все', callback_data='SET_ALL_ON_YES')],
+                    [InlineKeyboardButton(text='⬅️ К настройкам', callback_data='SETTINGS_BACK')],
+                ]),
+                parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+        await c.answer()
+
+    elif data == 'SET_ALL_ON_YES':
         n = db.set_all_channels(1)
         text, kb = build_settings_card()
         try:
@@ -1479,6 +1496,23 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         await c.answer(f'✅ Включено чатов: {n}')
 
     elif data == 'SET_ALL_OFF':
+        try:
+            total = db.c.execute('SELECT COUNT(*) FROM CHANNELS').fetchone()[0] or 0
+        except Exception:
+            total = 0
+        try:
+            await c.message.edit_text(
+                f'Выключить рассылку во <b>всех {total}</b> чатах?',
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text='⛔ Да, выключить все', callback_data='SET_ALL_OFF_YES')],
+                    [InlineKeyboardButton(text='⬅️ К настройкам', callback_data='SETTINGS_BACK')],
+                ]),
+                parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+        await c.answer()
+
+    elif data == 'SET_ALL_OFF_YES':
         n = db.set_all_channels(0)
         text, kb = build_settings_card()
         try:

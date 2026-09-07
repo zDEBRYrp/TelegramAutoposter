@@ -153,6 +153,49 @@ def test_send_state_line():
     assert '❌' in main._send_state_line(-2)
 
 
+def test_load_schedule_bulk_and_save():
+    import user as _u
+    from sqliter import DBConnection
+    db = DBConnection(db_path=':memory:')
+    try:
+        db.add_channel(-1)
+        db.set_send_next(-1, 777.0)
+        sched = _u.load_schedule(db, [-1, -2])
+        assert sched == {-1: 777.0}  # -2 нет в БД — пропускаем
+        _u.save_schedule(db, -1, 888.0)
+        assert db.get_send_next(-1) == 888.0
+    finally:
+        db.c.close()
+        db.conn.close()
+
+
+def test_load_schedule_fallback_and_empty():
+    import user as _u
+
+    class NoCursorDB:
+        def __init__(self):
+            self.saved = {}
+
+        def get_send_next(self, cid):
+            return 111.0 if cid == -1 else 0.0
+
+        def set_send_next(self, cid, ts):
+            self.saved[cid] = ts
+            return True
+
+    db = NoCursorDB()
+    assert _u.load_schedule(db, [-1, -2]) == {-1: 111.0, -2: 0.0}
+    _u.save_schedule(db, -1, 222.0)
+    assert db.saved[-1] == 222.0
+    assert _u.load_schedule(object(), [-1]) == {}
+
+    class BoomDB:
+        def set_send_next(self, cid, ts):
+            raise RuntimeError('locked')
+
+    _u.save_schedule(BoomDB(), -1, 1.0)  # не должно упасть
+
+
 def test_plan_sends_all_due_first_time():
     roster = [{'id': -1}, {'id': -2}, {'id': -3}]
     due, wait = user._plan_sends(roster, {-1: 1, -2: 1, -3: 1}, {}, 1000.0)

@@ -25,6 +25,8 @@ def test_migration_adds_columns_to_old_db(tmp_path):
     db = DBConnection(db_path=p)
     cols = [r[1] for r in db.c.execute('PRAGMA table_info(SETTINGS)').fetchall()]
     assert 'LOG_ENABLED' in cols and 'LOG_CHAT' in cols and 'REPORT_ENABLED' in cols
+    ch_cols = [r[1] for r in db.c.execute('PRAGMA table_info(CHANNELS)').fetchall()]
+    assert 'SEND_NEXT' in ch_cols
     assert db.get_log_config() == (0, '')
     assert db.get_report_enabled() == 1
     db.c.close()
@@ -142,3 +144,22 @@ def test_settings_handlers_registered():
     names = [h.callback.__name__ for h in main.router.message.handlers]
     assert 'settings_menu' in names
     assert 'input_log_chat' in names
+
+
+def test_bulk_actions_need_confirm():
+    import inspect
+    src = inspect.getsource(main.callback_handler)
+    assert 'SET_ALL_ON_YES' in src and 'SET_ALL_OFF_YES' in src
+
+
+def test_send_next_roundtrip():
+    db = _memdb()
+    try:
+        db.add_channel(-1)
+        assert db.get_send_next(-1) == 0.0
+        assert db.set_send_next(-1, 1234.5) is True
+        assert db.get_send_next(-1) == 1234.5
+        assert db.get_send_next(-999) == 0.0
+    finally:
+        db.c.close()
+        db.conn.close()
