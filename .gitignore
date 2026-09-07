@@ -23,6 +23,7 @@ Thumbs.db
 database.db
 session.session
 session.session-journal
+bot.lock
 *.bak
 
 # Photos

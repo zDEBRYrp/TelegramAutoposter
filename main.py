@@ -5,7 +5,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram import Router, F
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramConflictError
+from aiogram.exceptions import TelegramConflictError, TelegramNetworkError
 from aiogram.types import (
     Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton, ErrorEvent
@@ -21,7 +21,7 @@ import config
 import user
 import updater
 
-from sqliter import DBConnection, markdown_to_html
+from sqliter import DBConnection, markdown_to_html, message_to_html
 
 router = Router()
 from aiogram.client.default import DefaultBotProperties
@@ -31,8 +31,9 @@ CODE_PROMPT = ('Введите код из Telegram:\nКод: {code}\n\n'
                '⚠️ Код вводите <b>только кнопками ниже</b> — '
                'не отправляйте его сообщением в чат, такой код не приму.')
 
-MARKDOWN_HINT = ('\n\nРазметка: **жирный**, *курсив*, ~~зачёрк~~, '
-                 '||спойлер||, `код`, [текст](ссылка), > цитата') 
+MARKDOWN_HINT = ('\n\nЛибо разметка текстом: **жирный**, *курсив*, ~~зачёрк~~, '
+                 '||спойлер||, `код`, [текст](ссылка), > цитата\n'
+                 'Либо форматируй прямо в приложении — подхвачу и его.') 
 
 def get_version():
     try:
@@ -40,6 +41,63 @@ def get_version():
             return f.read().strip()
     except:
         return "unknown"
+
+
+LOCK_FILE = 'bot.lock'
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid == os.getpid():
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # чужой процесс, но живой
+    except OSError:
+        return False
+    return True
+
+
+def release_lock():
+    try:
+        with open(LOCK_FILE, encoding='utf-8') as f:
+            owner = f.read().strip()
+        if owner == str(os.getpid()) and os.path.exists(LOCK_FILE):
+            os.remove(LOCK_FILE)
+    except OSError:
+        pass
+
+
+def acquire_lock() -> bool:
+    """Не даём запустить второго бота: два инстанса отбирают друг у друга
+    обновления и команды 'не работают'. Протухший lock битого процесса
+    перезаписываем."""
+    import atexit
+    if os.path.exists(LOCK_FILE):
+        try:
+            with open(LOCK_FILE, encoding='utf-8') as f:
+                old = int(f.read().strip())
+        except (ValueError, OSError):
+            old = 0
+        if old and _pid_alive(old):
+            logger.error(f'Бот уже запущен (pid {old}). Останови дубль — '
+                         f'иначе обновления делят два процесса и команды молчат.')
+            return False
+    try:
+        with open(LOCK_FILE, 'w', encoding='utf-8') as f:
+            f.write(str(os.getpid()))
+    except OSError as e:
+        logger.error(f'Не смог записать lock-файл: {e}')
+        return False
+    atexit.register(release_lock)
+    return True
+
+
+def _is_quiet_error(exc: BaseException) -> bool:
+    """Переходные сетевые сбои: aiogram сам ретраит, админа не спамим."""
+    return isinstance(exc, (TelegramNetworkError, TelegramConflictError))
 
 bot = Bot(token=config.TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
@@ -149,6 +207,12 @@ def _short(text: str, limit: int = 60) -> str:
     return text if len(text) <= limit else text[:limit - 1] + '…'
 
 
+def _display(text: str, limit: int = 60) -> str:
+    """Текст из БД для HTML-карточек: нормализует двойное экранирование
+    (новые записи уже содержат &lt; из entities, старые — сырой текст)."""
+    return html.escape(_short(html.unescape(text or ''), limit))
+
+
 # --- Подписи reply-кнопок (единый источник правды: меню и хендлеры используют их) ---
 BTN_START = '▶️ Запустить рассылку'
 BTN_STOP = '⏹ Остановить рассылку'
@@ -212,11 +276,13 @@ def get_chat_settings_keyboard(chat_id):
 def format_chat_info(chat_id: int) -> str:
     """Красивая карточка чата для EDIT_CHAT / TOGGLE_SPAM_SETTINGS."""
     spam_status = db.get_channel_spam_status(chat_id)
+    addit_val = ''
     try:
         addit = db.get_additional_text(chat_id)
-        addit_val = _short(addit[0], 80) if addit and addit[0] else '—'
+        addit_val = addit[0] if addit and addit[0] else ''
     except Exception:
-        addit_val = '—'
+        pass
+    addit_val = _display(addit_val, 80) if addit_val else '—'
     post_data = db.get_channel_post(chat_id)
     if post_data and (post_data[0] or post_data[1] or post_data[2]):
         parts = []
@@ -225,7 +291,7 @@ def format_chat_info(chat_id: int) -> str:
         if post_data[1]:
             parts.append('📹 видео')
         if post_data[2]:
-            parts.append(f'«{html.escape(_short(post_data[2], 50))}»')
+            parts.append(f'«{_display(post_data[2], 50)}»')
         post_desc = ' + '.join(parts)
     else:
         post_desc = '—'
@@ -233,7 +299,7 @@ def format_chat_info(chat_id: int) -> str:
     return (f'💬 <b>Чат {chat_id}</b>\n'
             f'{"✅ Рассылка включена" if spam_status == 1 else "⬜ Рассылка выключена"}\n'
             f'⏱ Интервал: {timeout_val} мин.\n'
-            f'💬 Доп. текст: {html.escape(addit_val)}\n'
+            f'💬 Доп. текст: {addit_val}\n'
             f'📝 Пост: {post_desc}')
 
 
@@ -485,7 +551,7 @@ async def post_settings(message: Message):
     if has_video:
         lines.append(f'📹 Видео: {html.escape(video)}')
     if text:
-        lines.append(f'💬 Текст: «{html.escape(_short(text, 120))}»')
+        lines.append(f'💬 Текст: «{_display(text, 120)}»')
     if not (has_photo or has_video or text):
         lines.append('❌ Пост пуст')
     lines.append(f'⏱ Интервал по умолчанию: {timeout} мин.')
@@ -1099,7 +1165,7 @@ async def input_additional_text(m: Message, state: FSMContext):
         pass
     try:
         if chat_id:
-            db.add_additional_text(chat_id, m.text)
+            db.add_additional_text(chat_id, message_to_html(m.text, m.entities))
             await bot.send_message(m.chat.id, f'Доп. текст для чата {chat_id} обновлен!')
         else:
             await bot.send_message(m.chat.id, 'Не найден ID чата.')
@@ -1119,7 +1185,7 @@ async def input_post_text(m: Message, state: FSMContext):
     except Exception:
         pass
     try:
-        db.change_text(m.text)
+        db.change_text(message_to_html(m.text, m.entities))
         await bot.send_message(m.chat.id, 'Текст глобального поста обновлен!')
     except Exception as e:
         await bot.send_message(m.chat.id, f'Ошибка: {e}')
@@ -1140,7 +1206,7 @@ async def input_channel_post_text(m: Message, state: FSMContext):
         pass
     try:
         if chat_id:
-            db.set_channel_post(chat_id, text=m.text)
+            db.set_channel_post(chat_id, text=message_to_html(m.text, m.entities))
             await bot.send_message(m.chat.id, 'Текст канального поста обновлен!')
         else:
             await bot.send_message(m.chat.id, 'Не найден ID чата.')
@@ -1432,6 +1498,9 @@ async def main():
 
 @dp.error()
 async def error_handler(event: ErrorEvent):
+    if _is_quiet_error(event.exception):
+        logger.warning(f'Переходная сетевая ошибка (самовоcстановление): {event.exception!r}')
+        return
     logger.exception(f"Ошибка хендлера: {event.exception!r}")
     chat_id = None
     try:
@@ -1452,4 +1521,6 @@ async def error_handler(event: ErrorEvent):
 
 
 if __name__ == '__main__':
+    if not acquire_lock():
+        raise SystemExit(1)
     asyncio.run(main())

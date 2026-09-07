@@ -6,15 +6,134 @@ from typing import Optional, Tuple, Any
 
 logger = logging.getLogger(__name__)
 
+# Маркер "текст уже готовый HTML из entities сообщения".
+# Такие тексты markdown_to_html возвращает как есть, без повторной конвертации.
+HTML_READY_MARK = '\u200b'
+
+
+def entities_to_html(text: str, entities) -> str:
+    """Форматирование Telegram-клиента (entities) -> HTML.
+
+    Смещения entities в UTF-16 кодовых единицах — маппим через байты.
+    Неизвестные/служебные entities (mention, hashtag, команды...) игнорируем,
+    их текст остаётся как есть.
+    """
+    import html as _h
+    if not text:
+        return ''
+    if not entities:
+        return _h.escape(text)
+
+    raw = text.encode('utf-16-le')
+    total_units = len(raw) // 2
+
+    def tags_for(ent):
+        t = ent.type
+        if t == 'bold':
+            return '<b>', '</b>'
+        if t == 'italic':
+            return '<i>', '</i>'
+        if t == 'underline':
+            return '<u>', '</u>'
+        if t == 'strikethrough':
+            return '<s>', '</s>'
+        if t == 'spoiler':
+            return '<tg-spoiler>', '</tg-spoiler>'
+        if t == 'code':
+            return '<code>', '</code>'
+        if t == 'pre':
+            return '<pre>', '</pre>'
+        if t == 'text_link' and getattr(ent, 'url', None):
+            return f'<a href="{_h.escape(ent.url, quote=True)}">', '</a>'
+        if t == 'text_mention' and getattr(ent, 'user', None):
+            uid = getattr(ent.user, 'id', '')
+            return f'<a href="tg://user?id={uid}">', '</a>'
+        if t == 'blockquote':
+            return '<blockquote>', '</blockquote>'
+        if t == 'expandable_blockquote':
+            return '<blockquote expandable>', '</blockquote>'
+        return None, None  # custom_emoji и прочие: текст без тегов
+
+    bounds = {0, total_units}
+    spans = []
+    for ent in entities:
+        try:
+            start = int(ent.offset)
+            end = start + int(ent.length)
+        except (TypeError, ValueError):
+            continue
+        if start < 0 or end <= start:
+            continue
+        start = min(start, total_units)
+        end = min(end, total_units)
+        bounds.add(start)
+        bounds.add(end)
+        spans.append((start, end, ent))
+    # внешние — раньше: сначала меньший offset, потом большая длина
+    spans.sort(key=lambda s: (s[0], -(s[1] - s[0])))
+
+    points = sorted(bounds)
+    starts: dict[int, list[tuple[int, str, str]]] = {}
+    for (s, e, ent) in spans:
+        o, cl = tags_for(ent)
+        if o:
+            starts.setdefault(s, []).append((e, o, cl))
+    for s in starts:
+        starts[s].sort(key=lambda t: -t[0])  # внешние (длинные) открываем первыми
+
+    out: list[str] = []
+    stack: list[tuple[int, str, str]] = []  # (end, open, close), верх — самый внутренний
+
+    def _open_at(p: int):
+        for (e, o, cl) in starts.get(p, []):
+            out.append(o)
+            stack.append((e, o, cl))
+
+    def _close_at(p: int):
+        while True:
+            idx = next((i for i in range(len(stack) - 1, -1, -1) if stack[i][0] == p), None)
+            if idx is None:
+                break
+            while len(stack) > idx:
+                out.append(stack.pop()[2])
+
+    prev = points[0]
+    _open_at(prev)
+    for p in points[1:]:
+        chunk = raw[prev * 2:p * 2].decode('utf-16-le')
+        if chunk:
+            out.append(_h.escape(chunk))
+        _close_at(p)
+        _open_at(p)
+        prev = p
+    while stack:  # на всякий случай (точки покрывают все концы, но мало ли)
+        out.append(stack.pop()[2])
+    return ''.join(out)
+
+
+def message_to_html(text: str | None, entities) -> str:
+    """Текст входящего сообщения -> то, что кладём в БД.
+
+    Есть entities (форматирование кнопками клиента) — возвращаем готовый HTML
+    с маркером; нет — сырой текст, markdown доконвертится при отправке.
+    """
+    if entities:
+        return HTML_READY_MARK + entities_to_html(text or '', entities)
+    return text or ''
+
 
 def markdown_to_html(text: str) -> str:
     """Конвертирует Markdown в HTML для Telegram.
 
     Код (```блоки``` и `инлайн`) выносится в плейсхолдеры до
     форматирования, чтобы **жирный** внутри кода не ломал разметку.
+    Текст с маркером HTML_READY_MARK (уже готовый HTML из entities)
+    возвращается как есть.
     """
     if not text:
         return text
+    if text.startswith(HTML_READY_MARK):
+        return text[len(HTML_READY_MARK):]
     import re
 
     # Экранируем HTML спецсимволы сначала
