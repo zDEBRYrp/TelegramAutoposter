@@ -2,6 +2,7 @@ import sqlite3
 import config
 import logging
 import os
+import time as _time
 from typing import Optional, Tuple, Any
 
 logger = logging.getLogger(__name__)
@@ -361,6 +362,17 @@ class DBConnection(object):
     def setTimeOut(self, time: int) -> bool:
         try:
             self.c.execute('UPDATE SETTINGS SET TIMEOUT = ? WHERE ID = ?', [time, 1])
+            # Уменьшили интервал — подтягиваем далёкие дедлайны ближе.
+            # min() только приближает; 0 (слать сразу) и прошлое не трогаем.
+            try:
+                t = int(time)
+                if t >= 1:
+                    self.c.execute(
+                        'UPDATE CHANNELS SET SEND_NEXT = min(SEND_NEXT, ?) '
+                        'WHERE SEND_NEXT > ?',
+                        [_time.time() + t * 60, _time.time() + t * 60])
+            except (TypeError, ValueError):
+                pass
             self.conn.commit()
             return True
         except Exception as e:
@@ -460,6 +472,16 @@ class DBConnection(object):
     def set_channel_timeout(self, channel_id: int, timeout: int) -> bool:
         try:
             self.c.execute('UPDATE CHANNELS SET TIMEOUT = ? WHERE CHANNEL = ?', [timeout, str(channel_id)])
+            try:
+                t = int(timeout)
+                if t >= 1:
+                    edge = _time.time() + t * 60
+                    self.c.execute(
+                        'UPDATE CHANNELS SET SEND_NEXT = min(SEND_NEXT, ?) '
+                        'WHERE CHANNEL = ? AND SEND_NEXT > ?',
+                        [edge, str(channel_id), edge])
+            except (TypeError, ValueError):
+                pass
             self.conn.commit()
             return True
         except Exception as e:

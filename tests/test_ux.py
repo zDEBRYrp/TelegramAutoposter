@@ -140,3 +140,23 @@ def test_chats_filter_tabs_present():
 
 def test_markdown_hint_mentions_spoiler():
     assert '||спойлер||' in main.MARKDOWN_HINT
+
+
+def test_next_send_line():
+    import time as _t
+    from sqliter import DBConnection
+    db = DBConnection(db_path=':memory:')
+    old = main.db
+    main.db = db
+    try:
+        db.add_channel(-1)
+        assert 'скоро' in main._next_send_line(-1)
+        db.set_send_next(-1, _t.time() - 5)
+        assert 'вот-вот' in main._next_send_line(-1)
+        db.set_send_next(-1, _t.time() + 28.5 * 60)
+        out = main._next_send_line(-1)
+        assert '28 мин' in out
+    finally:
+        main.db = old
+        db.c.close()
+        db.conn.close()

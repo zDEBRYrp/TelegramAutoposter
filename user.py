@@ -404,6 +404,36 @@ async def _deliver(chat_id: int, text: str,
         return False, str(e)
 
 
+SEND_STAGGER_SEC = 5  # пауза между отправками в РАЗНЫЕ чаты (антифлуд)
+POLL_STEP_SEC = 15  # гранулярность проверки флага/расписания
+SEND_ATTEMPTS = 3  # попыток отправки в чат подряд
+RETRY_DELAY_SEC = 10  # пауза между попытками в один чат
+
+
+async def _send_with_retries(chat_id: int, text: str,
+                             photo_path: str = None, video_path: str = None,
+                             attempts: int = SEND_ATTEMPTS):
+    """Пробуем отправить несколько раз подряд (FloodWait/отмена — наружу).
+    Фатальные ошибки не ретраим (бессмысленно). Возвращает (ok, err, tries)."""
+    last_err = ''
+    tries = 0
+    for n in range(max(1, attempts)):
+        tries += 1
+        try:
+            ok, err = await _deliver(chat_id, text, photo_path, video_path)
+        except (FloodWait, asyncio.CancelledError):
+            raise
+        if ok:
+            return True, '', tries
+        last_err = err
+        if _is_fatal_error_msg(err):
+            return False, err, tries
+        if n < max(1, attempts) - 1:
+            logger.warning(f"Попытка {tries} в {chat_id} не удалась ({err}), повтор через {RETRY_DELAY_SEC}с")
+            await asyncio.sleep(RETRY_DELAY_SEC)
+    return False, last_err, tries
+
+
 async def _log_send(db, chat: Dict[str, Any], text: str,
                     photo_path: str = None, video_path: str = None) -> None:
     """Копия отправленного поста в лог-чат (если включён).
@@ -432,10 +462,6 @@ async def _log_send(db, chat: Dict[str, Any], text: str,
         raise
     except Exception as e:
         logger.warning(f"Не смог записать в лог-чат {dest}: {e}")
-
-
-SEND_STAGGER_SEC = 5  # пауза между отправками в РАЗНЫЕ чаты (антифлуд)
-POLL_STEP_SEC = 15  # гранулярность проверки флага/расписания
 
 
 def load_schedule(db, ids) -> Dict[int, float]:
@@ -607,7 +633,8 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                     timeout = per_chat if per_chat and per_chat >= 1 else default_timeout
 
                     try:
-                        ok, err = await _deliver(chat['id'], text, photo_path, video_path)
+                        ok, err, tries = await _send_with_retries(
+                            chat['id'], text, photo_path, video_path)
                     except FloodWait as e:
                         wait = int(getattr(e, 'value', 30) or 30)
                         logger.warning(f"FloodWait {wait}s для {chat['id']}, повтор позже")
@@ -620,12 +647,12 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                     save_schedule(db, chat['id'], next_at[chat['id']])
                     disabled = register_send_result(db, chat['id'], ok, err)
                     if not ok:
-                        logger.error(f"Ошибка отправки в {chat['id']}: {err}")
+                        logger.error(f"Ошибка отправки в {chat['id']} после {tries} попыток: {err}")
                         if disabled:
                             await notify_admin(
                                 f'⛔ Чат {chat["id"]} выключен из рассылки: {err}')
                     else:
-                        logger.info(f"Отправлено в {chat['id']}, следующее через {timeout} мин.")
+                        logger.info(f"Отправлено в {chat['id']} с {tries} попытки, следующее через {timeout} мин.")
                         try:
                             await _log_send(db, chat, text, photo_path, video_path)
                         except asyncio.CancelledError:

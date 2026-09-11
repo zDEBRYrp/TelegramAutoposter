@@ -62,6 +62,40 @@ def test_channel_timeout(db):
     assert db.get_channel_timeout(CID) == 7
 
 
+def test_channel_timeout_clamps_far_deadline(db):
+    import time
+    db.add_channel(CID)
+    far = time.time() + 300 * 60
+    db.set_send_next(CID, far)
+    db.set_channel_timeout(CID, 5)  # уменьшили — дедлайн подтянулся
+    nxt = db.get_send_next(CID)
+    assert nxt < far and abs(nxt - (time.time() + 5 * 60)) < 60
+
+
+def test_channel_timeout_keeps_zero_and_past(db):
+    import time
+    db.add_channel(CID)
+    db.set_send_next(CID, 0.0)
+    db.set_channel_timeout(CID, 5)
+    assert db.get_send_next(CID) == 0.0  # слать сразу — не трогаем
+    past = time.time() - 100
+    db.set_send_next(CID, past)
+    db.set_channel_timeout(CID, 600)  # увеличили — прошлое не двигаем
+    assert abs(db.get_send_next(CID) - past) < 5
+
+
+def test_global_timeout_clamps_all(db):
+    import time
+    db.add_channel(CID)
+    db.add_channel(CID + 1)
+    far = time.time() + 300 * 60
+    db.set_send_next(CID, far)
+    db.set_send_next(CID + 1, 0.0)
+    db.setTimeOut(5)
+    assert db.get_send_next(CID) < far
+    assert db.get_send_next(CID + 1) == 0.0
+
+
 def test_unknown_channel_timeout_is_none(db):
     assert db.get_channel_timeout(111222333) is None
 

@@ -153,6 +153,60 @@ def test_send_state_line():
     assert '❌' in main._send_state_line(-2)
 
 
+def test_send_with_retries_eventually_ok(monkeypatch):
+    import user as _u
+    calls = []
+
+    async def scripted(cid, text, photo_path=None, video_path=None):
+        calls.append(1)
+        if len(calls) < 3:
+            return False, 'Timeout'
+        return True, ''
+
+    monkeypatch.setattr(_u, '_deliver', scripted)
+    monkeypatch.setattr(_u, 'RETRY_DELAY_SEC', 0)
+    assert run(_u._send_with_retries(-1, 'hi')) == (True, '', 3)
+    assert len(calls) == 3
+
+
+def test_send_with_retries_gives_up(monkeypatch):
+    import user as _u
+
+    async def always_fail(cid, text, photo_path=None, video_path=None):
+        return False, 'Timeout'
+
+    monkeypatch.setattr(_u, '_deliver', always_fail)
+    monkeypatch.setattr(_u, 'RETRY_DELAY_SEC', 0)
+    assert run(_u._send_with_retries(-1, 'hi')) == (False, 'Timeout', 3)
+
+
+def test_send_with_retries_no_retry_on_fatal(monkeypatch):
+    import user as _u
+    calls = []
+
+    async def fatal(cid, text, photo_path=None, video_path=None):
+        calls.append(1)
+        return False, 'PEER_ID_INVALID'
+
+    monkeypatch.setattr(_u, '_deliver', fatal)
+    assert run(_u._send_with_retries(-1, 'hi')) == (False, 'PEER_ID_INVALID', 1)
+    assert len(calls) == 1
+
+
+def test_send_with_retries_flood_bubbles(monkeypatch):
+    import user as _u
+    import pytest as _pt
+
+    async def flood(cid, text, photo_path=None, video_path=None):
+        fw = _u.FloodWait.__new__(_u.FloodWait)
+        fw.value = 5
+        raise fw
+
+    monkeypatch.setattr(_u, '_deliver', flood)
+    with _pt.raises(_u.FloodWait):
+        run(_u._send_with_retries(-1, 'hi'))
+
+
 def test_load_schedule_bulk_and_save():
     import user as _u
     from sqliter import DBConnection

@@ -562,6 +562,26 @@ def get_chat_settings_keyboard(chat_id):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _next_send_line(chat_id: int) -> str:
+    """Когда чату слать следующий пост (из расписания в БД)."""
+    try:
+        nxt = db.get_send_next(chat_id)
+    except Exception:
+        return ''
+    if not nxt:
+        return '⏳ Следующая: скоро (по расписанию)'
+    left = nxt - _time.time()
+    if left <= 0:
+        return '⏳ Следующая: вот-вот'
+    mins = int(left // 60)
+    when = _time.strftime('%H:%M', _time.localtime(nxt))
+    if mins < 1:
+        return f'⏳ Следующая: меньше минуты ({when})'
+    if mins < 60:
+        return f'⏳ Следующая: через ~{mins} мин ({when})'
+    return f'⏳ Следующая: через ~{mins // 60} ч {mins % 60} мин ({when})'
+
+
 def format_chat_info(chat_id: int) -> str:
     """Красивая карточка чата для EDIT_CHAT / TOGGLE_SPAM_SETTINGS."""
     spam_status = db.get_channel_spam_status(chat_id)
@@ -588,6 +608,7 @@ def format_chat_info(chat_id: int) -> str:
     return (f'💬 <b>Чат {chat_id}</b>\n'
             f'{"✅ Рассылка включена" if spam_status == 1 else "⬜ Рассылка выключена"}\n'
             f'⏱ Интервал: {timeout_val} мин.\n'
+            f'{_next_send_line(chat_id)}\n'
             f'💬 Доп. текст: {addit_val}\n'
             f'📝 Пост: {post_desc}\n'
             f'{_send_state_line(chat_id)}')
