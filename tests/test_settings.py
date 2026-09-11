@@ -144,6 +144,39 @@ def test_settings_handlers_registered():
     names = [h.callback.__name__ for h in main.router.message.handlers]
     assert 'settings_menu' in names
     assert 'input_log_chat' in names
+    assert 'echo_forward' in names
+
+
+def test_parse_log_target():
+    from types import SimpleNamespace as NS
+    assert main._parse_log_target(NS(forward_from_chat=NS(id=-1001), text=None)) == -1001
+    assert main._parse_log_target(NS(forward_from_chat=None, text='-1002227496698')) == -1002227496698
+    assert main._parse_log_target(NS(forward_from_chat=None, text='@durov')) == '@durov'
+    assert main._parse_log_target(NS(forward_from_chat=None, text='https://t.me/durov')) == '@durov'
+    assert main._parse_log_target(NS(forward_from_chat=None, text='')) is None
+    assert main._parse_log_target(NS(forward_from_chat=None, text=None)) is None
+
+
+def test_idle_hint():
+    from types import SimpleNamespace as NS
+    assert 'перезапуск' in main._idle_hint(NS(forward_from_chat=NS(id=1), text='x'))
+    assert 'ID чата' in main._idle_hint(NS(forward_from_chat=None, text='-100123'))
+    assert main._idle_hint(NS(forward_from_chat=None, text='привет')) is None
+
+
+def test_start_bat_russian():
+    import pathlib
+    src = pathlib.Path('start.bat').read_text(encoding='utf-8')
+    assert 'chcp 65001' in src
+    assert 'Запуск бота' in src
+    assert 'Zapusk' not in src
+
+
+def test_input_log_chat_never_silent():
+    import inspect
+    src = inspect.getsource(main.input_log_chat)
+    assert '_parse_log_target' in src
+    assert 'input_log_chat упал' in src  # внешний guard с сообщением
 
 
 def test_bulk_actions_need_confirm():

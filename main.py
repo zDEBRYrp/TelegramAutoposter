@@ -1676,6 +1676,24 @@ async def input_chat_link(m: Message, state: FSMContext):
     await state.clear()
 
 
+def _parse_log_target(m: Message):
+    """Куда писать лог: id из форварда, число, @username или t.me-ссылка.
+    Возвращает int/str либо None (нечего парсить)."""
+    fwd = m.forward_from_chat
+    if fwd is not None:
+        return fwd.id
+    raw = (m.text or '').strip()
+    if not raw:
+        return None
+    if re.fullmatch(r'-?\d+', raw):
+        return int(raw)
+    mm = re.search(r't\.me/(?:joinchat/|[+])?([a-zA-Z0-9_]+)', raw)
+    uname = ('@' + mm.group(1)) if mm else raw
+    if not uname.startswith('@'):
+        uname = '@' + uname.lstrip('@')
+    return uname
+
+
 @router.message(settings_state.log_chat)
 async def input_log_chat(m: Message, state: FSMContext):
     if await _deny_if_not_admin(m):
@@ -1683,42 +1701,38 @@ async def input_log_chat(m: Message, state: FSMContext):
         return
     prompt = await _prompt_id(state)
     await _clean_trigger(m)
-    dest = None
-    fwd = m.forward_from_chat
-    if fwd is not None:
-        dest = fwd.id
-    else:
-        raw = (m.text or '').strip()
-        if not raw:
+    try:
+        dest = _parse_log_target(m)
+        if dest is None:
             await _edit_or_send(m.chat.id, prompt,
                                 '❌ Перешли сообщение из лог-канала или отправь ID/@username.')
             return
-        if re.fullmatch(r'-?\d+', raw):
-            dest = int(raw)
-        else:
-            mm = re.search(r't\.me/(?:joinchat/|[+])?([a-zA-Z0-9_]+)', raw)
-            uname = ('@' + mm.group(1)) if mm else raw
-            if not uname.startswith('@'):
-                uname = '@' + uname.lstrip('@')
-            dest = uname
-    if not await user.ensure_connected():
-        await _edit_or_send(m.chat.id, prompt,
-                            'Pyrogram не подключен. Используй /login',
-                            back_to_settings_kb())
+        if not await user.ensure_connected():
+            await _edit_or_send(m.chat.id, prompt,
+                                'Pyrogram не подключен. Используй /login',
+                                back_to_settings_kb())
+            await state.clear()
+            return
+        try:
+            await user.client.send_message(dest, '✅ Лог отправок подключён: сюда будут падать копии постов.')
+        except Exception as e:
+            await _edit_or_send(m.chat.id, prompt,
+                                f'❌ Не смог написать в {html.escape(str(dest))}: {html.escape(str(e))}\n'
+                                f'Проверь что аккаунт участник чата и попробуй снова.')
+            return
+        db.set_log_chat(dest)
+        db.set_log_enabled(1)
+        text, kb = build_settings_card()
+        await _edit_or_send(m.chat.id, prompt, f'✅ Лог-чат подключён!\n\n{text}', kb)
         await state.clear()
-        return
-    try:
-        await user.client.send_message(dest, '✅ Лог отправок подключён: сюда будут падать копии постов.')
     except Exception as e:
-        await _edit_or_send(m.chat.id, prompt,
-                            f'❌ Не смог написать туда: {html.escape(str(e))}\n'
-                            f'Проверь что аккаунт участник чата и попробуй снова.')
-        return
-    db.set_log_chat(dest)
-    db.set_log_enabled(1)
-    text, kb = build_settings_card()
-    await _edit_or_send(m.chat.id, prompt, f'✅ Лог-чат подключён!\n\n{text}', kb)
-    await state.clear()
+        logger.exception('input_log_chat упал')
+        try:
+            await _edit_or_send(m.chat.id, prompt, f'❌ Ошибка: {html.escape(str(e))}',
+                                back_to_settings_kb())
+        except Exception:
+            pass
+        await state.clear()
 
 
 @router.message(addition.id)
@@ -2025,6 +2039,34 @@ async def handle_code_text(m: Message, state: FSMContext):
                    'Вводите код кнопками в сообщении выше ⬆️')
 
 
+def _idle_hint(m: Message) -> str | None:
+    """Подсказка когда админ шлёт что-то без активного ввода.
+    Частый случай: бот перезапускался и выбор (напр. лог-чата) сброшен."""
+    if m.forward_from_chat is not None:
+        return ('Похоже, выбор сброшен (бот перезапускался?) — это пересланное '
+                'сообщение ни к чему не привязано.\nОткрой ⚙️ Настройки → 📋 Лог-чат заново.')
+    t = (m.text or '').strip()
+    if re.fullmatch(r'-?\d{6,}', t):
+        return ('Похоже на ID чата, но сейчас ничего не спрашиваю '
+                '(выбор сбрасывается при перезапуске).\nЕсли выбирал лог-чат — '
+                'открой ⚙️ Настройки → 📋 Лог-чат заново.')
+    return None
+
+
+@router.message(F.forward_from_chat)
+async def echo_forward(m: Message, state: FSMContext):
+    if m.chat.type != 'private':
+        return
+    uid = m.from_user.id if m.from_user else 0
+    if m.chat.id not in config.ADMINS and uid not in config.ADMINS:
+        return
+    if await state.get_state() is not None:
+        return  # идёт ввод — хендлер состояния разберётся сам
+    sent = await m.answer(_idle_hint(m) or 'Неизвестная команда. /help — список команд.',
+                          reply_markup=welcome_keyboard())
+    asyncio.create_task(_auto_delete(m.chat.id, sent.message_id, 20))
+
+
 @router.message(F.text)
 async def echo_message(m: Message, state: FSMContext):
     if m.chat.type != 'private':
@@ -2034,7 +2076,8 @@ async def echo_message(m: Message, state: FSMContext):
         return
     if await state.get_state() is not None:
         return  # идёт ввод — молчим, ждём данные
-    sent = await m.answer('Неизвестная команда. /help — список команд.', reply_markup=welcome_keyboard())
+    sent = await m.answer(_idle_hint(m) or 'Неизвестная команда. /help — список команд.',
+                          reply_markup=welcome_keyboard())
     asyncio.create_task(_auto_delete(m.chat.id, sent.message_id, 15))
 
 
