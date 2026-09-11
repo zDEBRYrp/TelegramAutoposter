@@ -280,7 +280,9 @@ def _to_html(text: str) -> str:
         return ''
     try:
         from sqliter import markdown_to_html as _m2h
-        return _m2h(text)
+        html_text = _m2h(text)
+        # Pyrogram понимает только <spoiler>, а <tg-spoiler> молча выкидывает
+        return html_text.replace('<tg-spoiler>', '<spoiler>').replace('</tg-spoiler>', '</spoiler>')
     except Exception:
         return text
 
@@ -375,11 +377,24 @@ def register_send_result(db, chat_id: int, ok: bool, err: str) -> bool:
 
 
 async def _deliver(chat_id: int, text: str,
-                   photo_path: str = None, video_path: str = None):
+                   photo_path: str = None, video_path: str = None, fwd=None):
     """Отправка без исключений наружу (кроме FloodWait/Cancelled).
-    Возвращает (ok, error). При битой HTML-разметке — повтор plain-текстом."""
-    if not text and not photo_path and not video_path:
+    Возвращает (ok, error). При битой HTML-разметке — повтор plain-текстом.
+    fwd = (from_chat_id, message_id): переслать как есть (премиум-эмодзи целы),
+    текст следом отдельным сообщением."""
+    if not text and not photo_path and not video_path and not fwd:
         return True, ''
+    if fwd is not None:
+        try:
+            fwd_ids = fwd[1] if isinstance(fwd[1], list) else [fwd[1]]
+            await client.forward_messages(chat_id, fwd[0], fwd_ids)
+        except (FloodWait, asyncio.CancelledError):
+            raise
+        except Exception as e:
+            return False, str(e)
+        if not text:
+            return True, ''
+        photo_path = video_path = None
     try:
         await _send_with_fallback(chat_id, text, photo_path=photo_path, video_path=video_path)
         return True, ''
@@ -412,7 +427,7 @@ RETRY_DELAY_SEC = 10  # пауза между попытками в один ч�
 
 async def _send_with_retries(chat_id: int, text: str,
                              photo_path: str = None, video_path: str = None,
-                             attempts: int = SEND_ATTEMPTS):
+                             fwd=None, attempts: int = SEND_ATTEMPTS):
     """Пробуем отправить несколько раз подряд (FloodWait/отмена — наружу).
     Фатальные ошибки не ретраим (бессмысленно). Возвращает (ok, err, tries)."""
     last_err = ''
@@ -420,7 +435,7 @@ async def _send_with_retries(chat_id: int, text: str,
     for n in range(max(1, attempts)):
         tries += 1
         try:
-            ok, err = await _deliver(chat_id, text, photo_path, video_path)
+            ok, err = await _deliver(chat_id, text, photo_path, video_path, fwd)
         except (FloodWait, asyncio.CancelledError):
             raise
         if ok:
@@ -435,10 +450,10 @@ async def _send_with_retries(chat_id: int, text: str,
 
 
 async def _log_send(db, chat: Dict[str, Any], text: str,
-                    photo_path: str = None, video_path: str = None) -> None:
+                    photo_path: str = None, video_path: str = None, fwd=None) -> None:
     """Компактная копия отправленного поста в лог-чат (если включён):
     шапка с #log + сам пост цитатой (длинное сворачивается клиентом).
-    Никогда не роняет цикл рассылки."""
+    Форвард логируется форвардом. Никогда не роняет цикл рассылки."""
     try:
         enabled, target = db.get_log_config()
     except Exception:
@@ -481,7 +496,19 @@ async def _log_send(db, chat: Dict[str, Any], text: str,
         media_path = _resolve_media(video_path)
         is_video = bool(media_path)
     try:
-        if media_path:
+        if fwd is not None:
+            await _safe_send_text(header)
+            try:
+                fwd_ids = fwd[1] if isinstance(fwd[1], list) else [fwd[1]]
+                await client.forward_messages(dest, fwd[0], fwd_ids)
+            except (FloodWait, asyncio.CancelledError):
+                raise
+            except Exception as e:
+                logger.warning(f"Лог-форвард не ушёл в {dest}: {e}")
+                return
+            if body:
+                await _safe_send_text(f'<blockquote>{body}</blockquote>')
+        elif media_path:
             try:
                 if is_video:
                     await client.send_video(dest, media_path, caption=header,
@@ -662,6 +689,13 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                 try:
                     channel_post = db.get_channel_post(chat['id'])
                     photo_path = video_path = None
+                    fwd = None
+                    try:
+                        _fc, _fm = db.get_channel_forward(chat['id'])
+                        if _fc and _fm:
+                            fwd = (int(_fc), int(_fm))
+                    except Exception:
+                        fwd = None
                     if channel_post and (channel_post[0] or channel_post[1] or channel_post[2]):
                         text = channel_post[2] or ''
                         if chat.get('text'):
@@ -671,7 +705,8 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                         elif channel_post[1]:
                             video_path = f"{config.DIR}{channel_post[1]}" if config.DIR else channel_post[1]
                     else:
-                        # settings: [0]=ID, [1]=PHOTO, [2]=VIDEO, [3]=TEXT, [4]=SPAM, [5]=TIMEOUT
+                        # settings: [0]=ID, [1]=PHOTO, [2]=VIDEO, [3]=TEXT, [4]=SPAM, [5]=TIMEOUT,
+                        # [6]=FWD_CHAT, [7]=FWD_MSG
                         text = settings[3] or ''
                         if chat.get('text'):
                             text = f"{text}\n\n{chat['text']}" if text else chat['text']
@@ -679,6 +714,11 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                             photo_path = f"{config.DIR}{settings[1]}" if config.DIR else settings[1]
                         elif settings[2]:
                             video_path = f"{config.DIR}{settings[2]}" if config.DIR else settings[2]
+                        if fwd is None and len(settings) > 7 and settings[6] and settings[7]:
+                            try:
+                                fwd = (int(settings[6]), int(settings[7]))
+                            except (TypeError, ValueError):
+                                fwd = None
 
                     # Индивидуальный таймаут чата, иначе глобальный
                     try:
@@ -689,7 +729,7 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
 
                     try:
                         ok, err, tries = await _send_with_retries(
-                            chat['id'], text, photo_path, video_path)
+                            chat['id'], text, photo_path, video_path, fwd=fwd)
                     except FloodWait as e:
                         wait = int(getattr(e, 'value', 30) or 30)
                         logger.warning(f"FloodWait {wait}s для {chat['id']}, повтор позже")
@@ -709,7 +749,7 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                     else:
                         logger.info(f"Отправлено в {chat['id']} с {tries} попытки, следующее через {timeout} мин.")
                         try:
-                            await _log_send(db, chat, text, photo_path, video_path)
+                            await _log_send(db, chat, text, photo_path, video_path, fwd=fwd)
                         except asyncio.CancelledError:
                             raise
                         except Exception as e:

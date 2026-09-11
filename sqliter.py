@@ -247,6 +247,10 @@ class DBConnection(object):
             self._ensure_column('SETTINGS', 'LOG_CHAT', "TEXT DEFAULT ''")
             self._ensure_column('SETTINGS', 'REPORT_ENABLED', 'INTEGER DEFAULT 1')
             self._ensure_column('CHANNELS', 'SEND_NEXT', 'REAL DEFAULT 0')
+            self._ensure_column('SETTINGS', 'FWD_CHAT', 'INTEGER DEFAULT 0')
+            self._ensure_column('SETTINGS', 'FWD_MSG', 'INTEGER DEFAULT 0')
+            self._ensure_column('CHANNELS', 'POST_FWD_CHAT', 'INTEGER DEFAULT 0')
+            self._ensure_column('CHANNELS', 'POST_FWD_MSG', 'INTEGER DEFAULT 0')
             
             self.c.execute('SELECT * FROM SETTINGS WHERE ID = 1')
             if self.c.fetchone() is None:
@@ -317,10 +321,11 @@ class DBConnection(object):
             # Храним имя файла как есть (с расширением).
             # Для совместимости со старыми записями без расширения
             # чтение умеет подбирать расширение перебором.
-            # Установка фото сбрасывает видео (в посте только одно медиа).
+            # Установка фото сбрасывает видео и пересылку (в посте одно тело).
             base_name = os.path.basename(name) if name else ''
             if base_name:
-                self.c.execute('UPDATE SETTINGS SET PHOTO = ?, VIDEO = ? WHERE ID = ?', [base_name, '', 1])
+                self.c.execute('UPDATE SETTINGS SET PHOTO = ?, VIDEO = ?, FWD_CHAT = ?, FWD_MSG = ? WHERE ID = ?',
+                               [base_name, '', 0, 0, 1])
             else:
                 self.c.execute('UPDATE SETTINGS SET PHOTO = ? WHERE ID = ?', [base_name, 1])
             self.conn.commit()
@@ -333,13 +338,57 @@ class DBConnection(object):
         try:
             base_name = os.path.basename(name) if name else ''
             if base_name:
-                self.c.execute('UPDATE SETTINGS SET VIDEO = ?, PHOTO = ? WHERE ID = ?', [base_name, '', 1])
+                self.c.execute('UPDATE SETTINGS SET VIDEO = ?, PHOTO = ?, FWD_CHAT = ?, FWD_MSG = ? WHERE ID = ?',
+                               [base_name, '', 0, 0, 1])
             else:
                 self.c.execute('UPDATE SETTINGS SET VIDEO = ? WHERE ID = ?', [base_name, 1])
             self.conn.commit()
             return True
         except Exception as e:
             logger.error(f"Ошибка изменения видео: {e}")
+            return False
+
+    def set_forward(self, fwd_chat: int, fwd_msg: int) -> bool:
+        """Пост-пересылка (глобальный): вытесняет фото/видео, текст остаётся
+        и уйдёт отдельным сообщением после форварда."""
+        try:
+            self.c.execute('UPDATE SETTINGS SET FWD_CHAT = ?, FWD_MSG = ?, PHOTO = ?, VIDEO = ? WHERE ID = ?',
+                           [int(fwd_chat), int(fwd_msg), '', '', 1])
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка установки пересылки: {e}")
+            return False
+
+    def get_forward(self) -> Tuple[int, int]:
+        try:
+            self.c.execute('SELECT FWD_CHAT, FWD_MSG FROM SETTINGS WHERE ID = ?', [1])
+            row = self.c.fetchone()
+            if not row:
+                return 0, 0
+            return int(row[0] or 0), int(row[1] or 0)
+        except Exception as e:
+            logger.error(f"Ошибка чтения пересылки: {e}")
+            return 0, 0
+
+    def clear_forward(self) -> bool:
+        try:
+            self.c.execute('UPDATE SETTINGS SET FWD_CHAT = ?, FWD_MSG = ? WHERE ID = ?', [0, 0, 1])
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка очистки пересылки: {e}")
+            return False
+
+    def clear_global_media(self) -> bool:
+        """Убрать всё медийное из глобального поста: фото, видео, пересылку."""
+        try:
+            self.c.execute('UPDATE SETTINGS SET PHOTO = ?, VIDEO = ?, FWD_CHAT = ?, FWD_MSG = ? WHERE ID = ?',
+                           ['', '', 0, 0, 1])
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка очистки медиа: {e}")
             return False
     
     def settings(self) -> Optional[Tuple]:
@@ -550,14 +599,22 @@ class DBConnection(object):
                 if photo_base is not None:
                     updates.append('POST_PHOTO = ?')
                     params.append(photo_base)
-                    # только одно медиа в посте
+                    # только одно тело поста: медиа вытесняют друг друга и форвард
                     updates.append('POST_VIDEO = ?')
                     params.append('')
+                    updates.append('POST_FWD_CHAT = ?')
+                    params.append(0)
+                    updates.append('POST_FWD_MSG = ?')
+                    params.append(0)
                 if video_base is not None:
                     updates.append('POST_VIDEO = ?')
                     params.append(video_base)
                     updates.append('POST_PHOTO = ?')
                     params.append('')
+                    updates.append('POST_FWD_CHAT = ?')
+                    params.append(0)
+                    updates.append('POST_FWD_MSG = ?')
+                    params.append(0)
                 if text is not None:
                     updates.append('POST_TEXT = ?')
                     params.append(text)
@@ -580,11 +637,44 @@ class DBConnection(object):
         except Exception as e:
             logger.error(f"Ошибка получения канального поста: {e}")
             return None
-    
+
+    def set_channel_forward(self, channel_id: int, fwd_chat: int, fwd_msg: int) -> bool:
+        """Пост-пересылка для чата: вытесняет фото/видео, текст остаётся
+        и уйдёт отдельным сообщением после форварда."""
+        try:
+            self.c.execute('SELECT CHANNEL FROM CHANNELS WHERE CHANNEL = ?', [str(channel_id)])
+            if self.c.fetchone() is None:
+                self.c.execute(
+                    'INSERT INTO CHANNELS (CHANNEL, ADDITIONAL, SPAM_ENABLED, TIMEOUT, POST_FWD_CHAT, POST_FWD_MSG) '
+                    'VALUES (?, ?, ?, ?, ?, ?)',
+                    [str(channel_id), '', 0, 5, int(fwd_chat), int(fwd_msg)])
+            else:
+                self.c.execute(
+                    'UPDATE CHANNELS SET POST_FWD_CHAT = ?, POST_FWD_MSG = ?, POST_PHOTO = ?, POST_VIDEO = ? '
+                    'WHERE CHANNEL = ?',
+                    [int(fwd_chat), int(fwd_msg), '', '', str(channel_id)])
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка установки пересылки чата: {e}")
+            return False
+
+    def get_channel_forward(self, channel_id: int) -> Tuple[int, int]:
+        try:
+            self.c.execute('SELECT POST_FWD_CHAT, POST_FWD_MSG FROM CHANNELS WHERE CHANNEL = ?', [str(channel_id)])
+            row = self.c.fetchone()
+            if not row:
+                return 0, 0
+            return int(row[0] or 0), int(row[1] or 0)
+        except Exception as e:
+            logger.error(f"Ошибка чтения пересылки чата: {e}")
+            return 0, 0
+
     def clear_channel_post(self, channel_id: int) -> bool:
         try:
-            self.c.execute('UPDATE CHANNELS SET POST_PHOTO = ?, POST_VIDEO = ?, POST_TEXT = ? WHERE CHANNEL = ?',
-                          ['', '', '', str(channel_id)])
+            self.c.execute('UPDATE CHANNELS SET POST_PHOTO = ?, POST_VIDEO = ?, POST_TEXT = ?, '
+                           'POST_FWD_CHAT = ?, POST_FWD_MSG = ? WHERE CHANNEL = ?',
+                           ['', '', '', 0, 0, str(channel_id)])
             self.conn.commit()
             return True
         except Exception as e:

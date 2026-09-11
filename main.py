@@ -593,13 +593,20 @@ def format_chat_info(chat_id: int) -> str:
         pass
     addit_val = _display(addit_val, 80) if addit_val else '—'
     post_data = db.get_channel_post(chat_id)
-    if post_data and (post_data[0] or post_data[1] or post_data[2]):
+    try:
+        fwd_chat, fwd_msg = db.get_channel_forward(chat_id)
+    except Exception:
+        fwd_chat, fwd_msg = 0, 0
+    has_fwd = bool(fwd_chat and fwd_msg)
+    if post_data and (post_data[0] or post_data[1] or post_data[2]) or has_fwd:
         parts = []
-        if post_data[0]:
+        if post_data and post_data[0]:
             parts.append('📷 фото')
-        if post_data[1]:
+        if post_data and post_data[1]:
             parts.append('📹 видео')
-        if post_data[2]:
+        if has_fwd:
+            parts.append(f'📨 пересылка из {fwd_chat}')
+        if post_data and post_data[2]:
             parts.append(f'«{_display(post_data[2], 50)}»')
         post_desc = ' + '.join(parts)
     else:
@@ -725,6 +732,10 @@ class global_post_photo(StatesGroup):
 class global_post_video(StatesGroup):
     video = State()
 
+
+class global_post_forward(StatesGroup):
+    forward = State()
+
 class channel_post_text(StatesGroup):
     text = State()
 
@@ -733,6 +744,10 @@ class channel_post_photo(StatesGroup):
 
 class channel_post_video(StatesGroup):
     video = State()
+
+
+class channel_post_forward(StatesGroup):
+    forward = State()
 
 class global_time(StatesGroup):
     timeout = State()
@@ -881,7 +896,8 @@ async def return_menu(message: Message):
 
 def build_global_post_card() -> tuple[str, InlineKeyboardMarkup]:
     settings = db.settings()
-    # settings: [0]=ID, [1]=PHOTO, [2]=VIDEO, [3]=TEXT, [4]=SPAM, [5]=TIMEOUT
+    # settings: [0]=ID, [1]=PHOTO, [2]=VIDEO, [3]=TEXT, [4]=SPAM, [5]=TIMEOUT,
+    # [6]=FWD_CHAT, [7]=FWD_MSG
     photo = settings[1]
     video = settings[2]
     text = settings[3]
@@ -889,21 +905,29 @@ def build_global_post_card() -> tuple[str, InlineKeyboardMarkup]:
     timeout = settings[5]
     has_photo = bool(photo)
     has_video = bool(video)
+    fwd = (0, 0)
+    try:
+        fwd = db.get_forward()
+    except Exception:
+        pass
+    has_fwd = bool(fwd[0] and fwd[1])
 
     lines = ['<b>📝 Глобальный пост</b>']
     if has_photo:
         lines.append(f'📷 Фото: {html.escape(photo)}')
     if has_video:
         lines.append(f'📹 Видео: {html.escape(video)}')
+    if has_fwd:
+        lines.append(f'📨 Пересылка из {fwd[0]}')
     if text:
         lines.append(f'💬 Текст: «{_display(text, 120)}»')
-    if not (has_photo or has_video or text):
+    if not (has_photo or has_video or has_fwd or text):
         lines.append('❌ Пост пуст')
     lines.append(f'⏱ Интервал по умолчанию: {timeout} мин.')
     lines.append(f'{"✅ Рассылка запущена" if spam == 1 else "⬜ Рассылка остановлена"}')
 
     keyboard_rows = []
-    if has_photo or has_video or text:
+    if has_photo or has_video or has_fwd or text:
         keyboard_rows.append([InlineKeyboardButton(text='👁 Просмотреть пост', callback_data='VIEW_GLOBAL_POST')])
     keyboard_rows.append([InlineKeyboardButton(
         text=f'📝 Текст {"✅" if text else ""}', callback_data='EDIT_TEXT')])
@@ -911,8 +935,10 @@ def build_global_post_card() -> tuple[str, InlineKeyboardMarkup]:
         InlineKeyboardButton(text=f'📷 Фото {"✅" if has_photo else ""}', callback_data='EDIT_PHOTO'),
         InlineKeyboardButton(text=f'📹 Видео {"✅" if has_video else ""}', callback_data='EDIT_VIDEO')
     ])
-    if has_photo or has_video:
-        keyboard_rows.append([InlineKeyboardButton(text='🗑 Убрать фото/видео', callback_data='DEL_MEDIA')])
+    keyboard_rows.append([InlineKeyboardButton(
+        text=f'📨 Пересылка {"✅" if has_fwd else ""}', callback_data='EDIT_FORWARD')])
+    if has_photo or has_video or has_fwd:
+        keyboard_rows.append([InlineKeyboardButton(text='🗑 Убрать медиа', callback_data='DEL_MEDIA')])
     keyboard_rows.append([InlineKeyboardButton(text=f'⏱ Интервал: {timeout} мин.', callback_data='INTERVAL')])
 
     return '\n'.join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
@@ -1010,11 +1036,14 @@ async def list_channel_posts(message: Message):
         return
     await _clean_trigger(message)
     try:
-        db.c.execute('SELECT CHANNEL, POST_PHOTO, POST_VIDEO, POST_TEXT FROM CHANNELS WHERE COALESCE(POST_PHOTO, "") != "" OR COALESCE(POST_VIDEO, "") != "" OR COALESCE(POST_TEXT, "") != ""')
+        db.c.execute('SELECT CHANNEL, POST_PHOTO, POST_VIDEO, POST_TEXT, POST_FWD_CHAT, POST_FWD_MSG FROM CHANNELS '
+                     'WHERE COALESCE(POST_PHOTO, "") != "" OR COALESCE(POST_VIDEO, "") != "" OR '
+                     'COALESCE(POST_TEXT, "") != "" OR COALESCE(POST_FWD_CHAT, 0) != 0')
         posts = db.c.fetchall()
         if posts:
             text = '📋 <b>Посты чатов:</b>\n' + '\n'.join(
-                f'• Чат {p[0]}: {"📷" if p[1] else ""}{"📹" if p[2] else ""}{"📝" if p[3] else ""}' for p in posts)
+                f'• Чат {p[0]}: {"📷" if p[1] else ""}{"📹" if p[2] else ""}'
+                f'{"📝" if p[3] else ""}{"📨" if (p[4] and p[5]) else ""}' for p in posts)
             await message.answer(text)
         else:
             await message.answer('Постов чатов пока нет. Нажми «➕ Новый пост» — подскажу где создать.')
@@ -1127,6 +1156,38 @@ async def handle_password_input(m: Message, state: FSMContext):
         pass
     sent = await m.answer('Пароль сохранён. Нажмите «Подтвердить» для входа:', reply_markup=keyboard)
     await state.update_data({'pwd_confirm_id': sent.message_id})
+
+
+async def preview_forward(to_chat: int, fwd_chat: int, fwd_msg: int) -> tuple[bool, str]:
+    """Показать пересылку админу: форвардим исходник ему в личку."""
+    if not await user.ensure_connected():
+        return False, 'Pyrogram не подключён'
+    try:
+        await user.client.forward_messages(to_chat, fwd_chat, [fwd_msg])
+        return True, ''
+    except Exception as e:
+        return False, str(e)
+
+
+async def _capture_forward(m: Message) -> tuple[bool, int, int, str]:
+    """(ok, fwd_chat, fwd_msg, err) из пересланного сообщения."""
+    fc = m.forward_from_chat
+    fm = m.forward_from_message_id
+    if fc is not None and fm:
+        return True, fc.id, fm, ''
+    if fc is not None:
+        return False, 0, 0, 'у пересланного нет id сообщения (скрытый источник?)'
+    return False, 0, 0, 'это не пересылка — перешли пост из канала'
+
+
+async def _forward_source_title(fwd_chat: int) -> str:
+    try:
+        if await user.ensure_connected():
+            ch = await user.client.get_chat(fwd_chat)
+            return getattr(ch, 'title', None) or str(fwd_chat)
+    except Exception:
+        pass
+    return str(fwd_chat)
 
 
 @router.callback_query(F.data)
@@ -1323,12 +1384,18 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         has_photo = bool(post_data and post_data[0])
         has_video = bool(post_data and post_data[1])
         has_text = bool(post_data and post_data[2])
-        has_post = has_photo or has_video or has_text
+        try:
+            _fc, _fm = db.get_channel_forward(chat_id)
+            has_fwd = bool(_fc and _fm)
+        except Exception:
+            has_fwd = False
+        has_post = has_photo or has_video or has_text or has_fwd
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text='👁 Посмотреть пост', callback_data=f'VIEW_CHANNEL_POST:{chat_id}')] if has_post else [],
             [InlineKeyboardButton(text=f'📝 Текст {"✅" if has_text else ""}', callback_data=f'CHANNEL_EDIT_TEXT:{chat_id}')],
             [InlineKeyboardButton(text=f'📷 Фото {"✅" if has_photo else ""}', callback_data=f'CHANNEL_EDIT_PHOTO:{chat_id}'),
              InlineKeyboardButton(text=f'📹 Видео {"✅" if has_video else ""}', callback_data=f'CHANNEL_EDIT_VIDEO:{chat_id}')],
+            [InlineKeyboardButton(text=f'📨 Пересылка {"✅" if has_fwd else ""}', callback_data=f'CHANNEL_EDIT_FORWARD:{chat_id}')],
             [InlineKeyboardButton(text='🗑 Очистить пост', callback_data=f'CHANNEL_CLEAR:{chat_id}')] if has_post else [],
             [InlineKeyboardButton(text='⬅️ К чату', callback_data=f'EDIT_CHAT:{chat_id}')]
         ])
@@ -1341,13 +1408,29 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
     elif data.startswith('VIEW_CHANNEL_POST:'):
         chat_id = int(data.split(':')[1])
         post_data = db.get_channel_post(chat_id)
-        if not post_data or not (post_data[0] or post_data[1] or post_data[2]):
+        try:
+            fwd_chat, fwd_msg = db.get_channel_forward(chat_id)
+        except Exception:
+            fwd_chat, fwd_msg = 0, 0
+        has_fwd = bool(fwd_chat and fwd_msg)
+        if not post_data or not (post_data[0] or post_data[1] or post_data[2] or has_fwd):
             await c.answer('Пост не установлен', show_alert=True)
             return
         photo, video, text = post_data
         text_html = markdown_to_html(text) if text else ''
         try:
-            if photo:
+            if has_fwd:
+                ok, err = await preview_forward(c.message.chat.id, fwd_chat, fwd_msg)
+                if not ok:
+                    await bot.send_message(
+                        c.message.chat.id,
+                        f'📨 Пересылка {fwd_chat}:{fwd_msg} (показать не вышло: {html.escape(err)})'
+                        + (f'\n{text_html}' if text_html else ''),
+                        parse_mode=ParseMode.HTML)
+                elif text_html:
+                    for chunk in split_html(text_html):
+                        await bot.send_message(c.message.chat.id, chunk, parse_mode=ParseMode.HTML)
+            elif photo:
                 found = resolve_media_path(photo)
                 if found:
                     await send_post_preview(c.message.chat.id, found, text_html)
@@ -1388,6 +1471,13 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         await state.set_state(channel_post_video.video)
         await c.answer()
 
+    elif data.startswith('CHANNEL_EDIT_FORWARD:'):
+        chat_id = int(data.split(':')[1])
+        await state.set_data({'chat_id': chat_id, 'prompt_id': c.message.message_id})
+        await c.message.edit_text('📨 Перешли сюда пост из канала — этот чат будет получать его как есть.')
+        await state.set_state(channel_post_forward.forward)
+        await c.answer()
+
     elif data.startswith('CHANNEL_CLEAR:'):
         chat_id = int(data.split(':')[1])
         db.clear_channel_post(chat_id)
@@ -1403,13 +1493,31 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
 
     elif data == 'VIEW_GLOBAL_POST':
         settings = db.settings()
-        # settings: [0]=ID, [1]=PHOTO, [2]=VIDEO, [3]=TEXT, [4]=SPAM, [5]=TIMEOUT
+        # settings: [0]=ID, [1]=PHOTO, [2]=VIDEO, [3]=TEXT, [4]=SPAM, [5]=TIMEOUT,
+        # [6]=FWD_CHAT, [7]=FWD_MSG
         photo = settings[1]
         video = settings[2]
         text = settings[3]
+        fwd = (0, 0)
+        try:
+            fwd = db.get_forward()
+            has_fwd = bool(fwd[0] and fwd[1])
+        except Exception:
+            has_fwd = False
         text_html = markdown_to_html(text) if text else ''
         try:
-            if photo:
+            if has_fwd:
+                ok, err = await preview_forward(c.message.chat.id, fwd[0], fwd[1])
+                if not ok:
+                    await bot.send_message(
+                        c.message.chat.id,
+                        f'📨 Пересылка {fwd[0]}:{fwd[1]} (показать не вышло: {html.escape(err)})'
+                        + (f'\n{text_html}' if text_html else ''),
+                        parse_mode=ParseMode.HTML)
+                elif text_html:
+                    for chunk in split_html(text_html):
+                        await bot.send_message(c.message.chat.id, chunk, parse_mode=ParseMode.HTML)
+            elif photo:
                 found = resolve_media_path(photo)
                 if found:
                     await send_post_preview(c.message.chat.id, found, text_html)
@@ -1444,11 +1552,21 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         await state.set_state(global_post_video.video)
         await c.answer()
 
-    elif data == 'DEL_MEDIA':
-        db.change_photo('')
-        db.change_video('')
-        await c.message.edit_text('🗑 Фото/видео убрано.')
+    elif data == 'EDIT_FORWARD':
+        await state.set_data({'prompt_id': c.message.message_id})
+        await c.message.edit_text('📨 Перешли сюда пост из канала — буду рассылать его как есть '
+                                  '(форматирование и премиум-эмодзи сохранятся).')
+        await state.set_state(global_post_forward.forward)
         await c.answer()
+
+    elif data == 'DEL_MEDIA':
+        db.clear_global_media()
+        text, kb = build_global_post_card()
+        try:
+            await c.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+        await c.answer('🗑 Медиа убрано')
 
     elif data == 'BACK_TO_GLOBAL':
         text, kb = build_global_post_card()
@@ -1928,6 +2046,71 @@ async def download_global_video(m: Message, state: FSMContext):
                         '✅ Видео общего поста обновлено.',
                         back_to_global_kb())
     await state.clear()
+
+
+@router.message(global_post_forward.forward)
+async def input_global_forward(m: Message, state: FSMContext):
+    if await _deny_if_not_admin(m):
+        await state.clear()
+        return
+    prompt = await _prompt_id(state)
+    await _clean_trigger(m)
+    try:
+        ok, fc, fm, err = await _capture_forward(m)
+        if not ok:
+            await _edit_or_send(m.chat.id, prompt, f'❌ {err} Попробуй снова.')
+            return
+        db.set_forward(fc, fm)
+        title = await _forward_source_title(fc)
+        await _edit_or_send(
+            m.chat.id, prompt,
+            f'✅ Пост-пересылка сохранён (из {html.escape(title)}).\n'
+            f'Текст (если задан) уйдёт следом отдельным сообщением.',
+            back_to_global_kb())
+        await state.clear()
+    except Exception as e:
+        logger.exception('input_global_forward упал')
+        try:
+            await _edit_or_send(m.chat.id, prompt, f'❌ Ошибка: {html.escape(str(e))}',
+                                back_to_global_kb())
+        except Exception:
+            pass
+        await state.clear()
+
+
+@router.message(channel_post_forward.forward)
+async def input_channel_post_forward(m: Message, state: FSMContext):
+    if await _deny_if_not_admin(m):
+        await state.clear()
+        return
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+    prompt = data.get('prompt_id')
+    await _clean_trigger(m)
+    if not chat_id:
+        await _edit_or_send(m.chat.id, prompt, 'Не найден ID чата.', back_to_chats_kb())
+        await state.clear()
+        return
+    try:
+        ok, fc, fm, err = await _capture_forward(m)
+        if not ok:
+            await _edit_or_send(m.chat.id, prompt, f'❌ {err} Попробуй снова.')
+            return
+        db.set_channel_forward(chat_id, fc, fm)
+        title = await _forward_source_title(fc)
+        await _edit_or_send(
+            m.chat.id, prompt,
+            f'✅ Пост-пересылка для чата {chat_id} сохранён (из {html.escape(title)}).',
+            back_to_channel_post_kb(chat_id))
+        await state.clear()
+    except Exception as e:
+        logger.exception('input_channel_post_forward упал')
+        try:
+            await _edit_or_send(m.chat.id, prompt, f'❌ Ошибка: {html.escape(str(e))}',
+                                back_to_channel_post_kb(chat_id))
+        except Exception:
+            pass
+        await state.clear()
 
 
 @router.message(global_time.timeout)
