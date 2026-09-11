@@ -166,10 +166,16 @@ def test_idle_hint():
 
 def test_start_bat_russian():
     import pathlib
-    src = pathlib.Path('start.bat').read_text(encoding='utf-8')
+    raw = pathlib.Path('start.bat').read_bytes()
+    assert b'\xef\xbb\xbf' not in raw[:3]  # без BOM — иначе cmd давится первой строкой
+    total_lf = raw.count(b'\n')
+    crlf = raw.count(b'\r\n')
+    assert total_lf > 0 and crlf == total_lf, 'start.bat должен быть CRLF (cmd глючит на LF-блоках)'
+    src = raw.decode('utf-8')
     assert 'chcp 65001' in src
     assert 'Запуск бота' in src
     assert 'Zapusk' not in src
+    assert 'cd /d "%~dp0"' in src
 
 
 def test_input_log_chat_never_silent():
