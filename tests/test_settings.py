@@ -95,14 +95,41 @@ class StubDB:
         return self.enabled, self.target
 
 
-def test_log_send_writes_header_and_copy(monkeypatch):
+def test_log_send_quote_and_tag(monkeypatch):
     import user
     stub = StubClient()
     monkeypatch.setattr(user, 'client', stub)
     run(user._log_send(StubDB(), {'id': -1, 'title': 'C'}, 'hello'))
-    assert len(stub.sent) == 2  # шапка + копия поста
-    assert '-1' in stub.sent[0][1]
-    assert stub.sent[1][1] == 'hello'
+    assert len(stub.sent) == 1  # всё одним сообщением
+    text = stub.sent[0][1]
+    assert '#log' in text
+    assert '<blockquote>hello</blockquote>' in text
+    assert '-1' in text
+
+
+def test_log_send_media_caption_plus_quote(monkeypatch, tmp_path):
+    import user
+    pic = tmp_path / 'p.jpg'
+    pic.write_bytes(b'x')
+    stub = StubClient()
+    monkeypatch.setattr(user, 'client', stub)
+    run(user._log_send(StubDB(), {'id': -1, 'title': 'C'}, 'hi',
+                       photo_path=str(pic)))
+    assert len(stub.sent) == 2
+    assert '#log' in stub.sent[0][2]  # подпись медиа
+    assert '<blockquote>' not in (stub.sent[0][2] or '')
+    assert '<blockquote>hi</blockquote>' in stub.sent[1][1]
+
+
+def test_log_send_media_no_text_single(monkeypatch, tmp_path):
+    import user
+    pic = tmp_path / 'p.jpg'
+    pic.write_bytes(b'x')
+    stub = StubClient()
+    monkeypatch.setattr(user, 'client', stub)
+    run(user._log_send(StubDB(), {'id': -1, 'title': 'C'}, '',
+                       photo_path=str(pic)))
+    assert len(stub.sent) == 1  # только медиа с подписью
 
 
 def test_log_send_disabled_or_empty(monkeypatch):
