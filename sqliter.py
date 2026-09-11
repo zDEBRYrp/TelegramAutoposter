@@ -251,6 +251,11 @@ class DBConnection(object):
             self._ensure_column('SETTINGS', 'FWD_MSG', 'INTEGER DEFAULT 0')
             self._ensure_column('CHANNELS', 'POST_FWD_CHAT', 'INTEGER DEFAULT 0')
             self._ensure_column('CHANNELS', 'POST_FWD_MSG', 'INTEGER DEFAULT 0')
+            self._ensure_column('CHANNELS', 'SLOWMODE', 'INTEGER DEFAULT 0')
+            self._ensure_column('CHANNELS', 'SLOWMODE_AT', 'REAL DEFAULT 0')
+            self._ensure_column('CHANNELS', 'TOPIC_ID', 'INTEGER DEFAULT 0')
+            self._ensure_column('CHANNELS', 'TOPIC_NAME', "TEXT DEFAULT ''")
+            self._ensure_column('SETTINGS', 'SYNC_SLOWMODE', 'INTEGER DEFAULT 1')
             
             self.c.execute('SELECT * FROM SETTINGS WHERE ID = 1')
             if self.c.fetchone() is None:
@@ -507,6 +512,72 @@ class DBConnection(object):
             return True
         except Exception as e:
             logger.error(f"Ошибка записи расписания: {e}")
+            return False
+
+    def get_slowmode(self, channel_id: int) -> Tuple[int, float]:
+        """(slowmode_seconds, measured_at). 0 = нет/неизвестно."""
+        try:
+            self.c.execute('SELECT SLOWMODE, SLOWMODE_AT FROM CHANNELS WHERE CHANNEL = ?',
+                           [str(channel_id)])
+            row = self.c.fetchone()
+            if not row:
+                return 0, 0.0
+            return int(row[0] or 0), float(row[1] or 0)
+        except Exception as e:
+            logger.error(f"Ошибка чтения слоумода: {e}")
+            return 0, 0.0
+
+    def set_slowmode(self, channel_id: int, seconds: int) -> bool:
+        try:
+            import time as _t
+            self.c.execute('UPDATE CHANNELS SET SLOWMODE = ?, SLOWMODE_AT = ? WHERE CHANNEL = ?',
+                           [int(seconds or 0), _t.time(), str(channel_id)])
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка записи слоумода: {e}")
+            return False
+
+    def get_sync_slowmode(self) -> int:
+        try:
+            self.c.execute('SELECT SYNC_SLOWMODE FROM SETTINGS WHERE ID = ?', [1])
+            row = self.c.fetchone()
+            return 1 if not row or row[0] is None else int(row[0])
+        except Exception as e:
+            logger.error(f"Ошибка чтения SYNC_SLOWMODE: {e}")
+            return 1
+
+    def set_sync_slowmode(self, enabled: int) -> bool:
+        try:
+            self.c.execute('UPDATE SETTINGS SET SYNC_SLOWMODE = ? WHERE ID = ?',
+                           [1 if enabled else 0, 1])
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка переключения SYNC_SLOWMODE: {e}")
+            return False
+
+    def get_topic(self, channel_id: int) -> Tuple[int, str]:
+        """(topic_id, name). topic_id 0 = General."""
+        try:
+            self.c.execute('SELECT TOPIC_ID, TOPIC_NAME FROM CHANNELS WHERE CHANNEL = ?',
+                           [str(channel_id)])
+            row = self.c.fetchone()
+            if not row:
+                return 0, ''
+            return int(row[0] or 0), (row[1] or '')
+        except Exception as e:
+            logger.error(f"Ошибка чтения темы: {e}")
+            return 0, ''
+
+    def set_topic(self, channel_id: int, topic_id: int, name: str = '') -> bool:
+        try:
+            self.c.execute('UPDATE CHANNELS SET TOPIC_ID = ?, TOPIC_NAME = ? WHERE CHANNEL = ?',
+                           [int(topic_id or 0), str(name or ''), str(channel_id)])
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка установки темы: {e}")
             return False
     
     def stop_spam_for_channel(self, channel_id: int) -> bool:

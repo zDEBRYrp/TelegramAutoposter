@@ -418,6 +418,10 @@ def build_settings_card() -> tuple[str, InlineKeyboardMarkup]:
     except Exception:
         report_on = 1
     try:
+        sync_on = db.get_sync_slowmode() == 1
+    except Exception:
+        sync_on = True
+    try:
         all_chats = db.c.execute('SELECT COUNT(*), COALESCE(SUM(SPAM_ENABLED), 0) FROM CHANNELS').fetchone()
         total, active = (all_chats[0] or 0), (all_chats[1] or 0)
     except Exception:
@@ -428,6 +432,7 @@ def build_settings_card() -> tuple[str, InlineKeyboardMarkup]:
         '<b>⚙️ Настройки</b>',
         f'📤 Лог отправок: {"✅ вкл" if log_on else "⬜ выкл"} → {log_target}',
         f'📊 Отчёт о старте: {"✅ вкл" if report_on else "⬜ выкл"}',
+        f'🐢 КД впритык к слоумоду: {"✅ вкл" if sync_on else "⬜ выкл"}',
         f'💬 Чаты: {active} активно из {total}',
     ]
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -438,6 +443,9 @@ def build_settings_card() -> tuple[str, InlineKeyboardMarkup]:
         [InlineKeyboardButton(
             text=f'📊 Отчёт о старте: {"✅" if report_on else "⬜"}',
             callback_data='SET_TOGGLE_REPORT')],
+        [InlineKeyboardButton(
+            text=f'🐢 КД впритык: {"✅" if sync_on else "⬜"}',
+            callback_data='SET_TOGGLE_SYNC')],
         [InlineKeyboardButton(text='✅ Включить все', callback_data='SET_ALL_ON'),
          InlineKeyboardButton(text='⛔ Выключить все', callback_data='SET_ALL_OFF')],
         [InlineKeyboardButton(text='♻️ Обновить список чатов', callback_data='SET_REFRESH_CHATS'),
@@ -546,9 +554,15 @@ def get_chat_settings_keyboard(chat_id):
         timeout_val = db.get_channel_timeout(chat_id)
     except Exception:
         timeout_val = None
+    try:
+        topic_id, topic_name = db.get_topic(chat_id)
+    except Exception:
+        topic_id, topic_name = 0, ''
+    topic_label = 'General' if not topic_id else (topic_name or f'#{topic_id}')
     rows = [
         [InlineKeyboardButton(text=spam_text, callback_data=f'TOGGLE_SPAM_SETTINGS:{chat_id}')],
         [InlineKeyboardButton(text='📝 Пост чата', callback_data=f'EDIT_CHANNEL_POST:{chat_id}')],
+        [InlineKeyboardButton(text=f'🧵 Тема: {_short(topic_label, 20)}', callback_data=f'TOPIC:{chat_id}')],
         [InlineKeyboardButton(text=f'⏱ Интервал: {timeout_val} мин.', callback_data=f'CHANGE_TIMEOUT:{chat_id}')],
         [InlineKeyboardButton(text='💬 Доп. текст', callback_data=f'ADD_ADDITIONAL:{chat_id}')],
     ]
@@ -582,6 +596,20 @@ def _next_send_line(chat_id: int) -> str:
     return f'⏳ Следующая: через ~{mins // 60} ч {mins % 60} мин ({when})'
 
 
+def _fmt_delay(sec: int) -> str:
+    try:
+        sec = int(sec)
+    except (TypeError, ValueError):
+        return '—'
+    if sec < 60:
+        return f'{sec}с'
+    mins, sec = divmod(sec, 60)
+    if mins < 60:
+        return f'{mins} мин'
+    hours, mins = divmod(mins, 60)
+    return f'{hours} ч {mins} мин' if mins else f'{hours} ч'
+
+
 def format_chat_info(chat_id: int) -> str:
     """Красивая карточка чата для EDIT_CHAT / TOGGLE_SPAM_SETTINGS."""
     spam_status = db.get_channel_spam_status(chat_id)
@@ -612,9 +640,33 @@ def format_chat_info(chat_id: int) -> str:
     else:
         post_desc = '—'
     timeout_val = db.get_channel_timeout(chat_id)
+    try:
+        topic_id, topic_name = db.get_topic(chat_id)
+    except Exception:
+        topic_id, topic_name = 0, ''
+    topic_desc = 'General' if not topic_id else html.escape(topic_name or f'#{topic_id}')
+    try:
+        slow, _ = db.get_slowmode(chat_id)
+    except Exception:
+        slow = 0
+    try:
+        sync_on = db.get_sync_slowmode() == 1
+    except Exception:
+        sync_on = True
+    slow_line = ''
+    if slow:
+        try:
+            eff = user._effective_delay(timeout_val, slow, sync_on)
+        except Exception:
+            eff = None
+        if sync_on and eff:
+            slow_line = f'\n🐢 Слоумод: {slow}с → шлём каждые ~{_fmt_delay(eff)}'
+        else:
+            slow_line = f'\n🐢 Слоумод: {slow}с (синх выкл)'
     return (f'💬 <b>Чат {chat_id}</b>\n'
             f'{"✅ Рассылка включена" if spam_status == 1 else "⬜ Рассылка выключена"}\n'
-            f'⏱ Интервал: {timeout_val} мин.\n'
+            f'⏱ Интервал: {timeout_val} мин.{slow_line}\n'
+            f'🧵 Тема: {topic_desc}\n'
             f'{_next_send_line(chat_id)}\n'
             f'💬 Доп. текст: {addit_val}\n'
             f'📝 Пост: {post_desc}\n'
@@ -763,6 +815,10 @@ class add_chat_state(StatesGroup):
 
 class settings_state(StatesGroup):
     log_chat = State()
+
+
+class topic_state(StatesGroup):
+    id = State()
 
 
 @router.message(Command("start"))
@@ -1369,6 +1425,60 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         await state.set_state(addition.id)
         await c.answer()
 
+    elif data.startswith('TOPIC:'):
+        chat_id = int(data.split(':')[1])
+        await state.set_data({'chat_id': chat_id, 'prompt_id': c.message.message_id})
+        try:
+            topics = await user.get_forum_topics(chat_id)
+        except Exception as e:
+            await c.message.edit_text(
+                f'🧵 Темы не читаются: {html.escape(str(e))}\n'
+                f'Если это не форум-группа — темы не нужны, шлём в общую ленту.',
+                reply_markup=back_to_chat_kb(chat_id))
+            await c.answer()
+            return
+        rows = [[InlineKeyboardButton(text='💬 General (общая лента)',
+                                      callback_data=f'TOPIC_SET:{chat_id}:0')]]
+        for t in topics[:20]:
+            label = _short(t.get('title') or f"#{t['id']}", 30)
+            rows.append([InlineKeyboardButton(
+                text=f'🧵 {label}', callback_data=f"TOPIC_SET:{chat_id}:{t['id']}")])
+        rows.append([InlineKeyboardButton(text='🔢 Ввести ID темы', callback_data=f'TOPIC_MANUAL:{chat_id}')])
+        rows.append([InlineKeyboardButton(text='⬅️ К чату', callback_data=f'EDIT_CHAT:{chat_id}')])
+        await c.message.edit_text(
+            '🧵 <b>Выбери тему форума</b> — посты пойдут ответом в неё:' if topics
+            else '🧵 Это не форум (тем нет) — шлём в общую ленту.\nМожешь задать ID вручную:',
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        await c.answer()
+
+    elif data.startswith('TOPIC_SET:'):
+        _, chat_s, topic_s = data.split(':')
+        chat_id, topic_id = int(chat_s), int(topic_s)
+        name = ''
+        if topic_id:
+            try:
+                for t in await user.get_forum_topics(chat_id):
+                    if int(t['id']) == topic_id:
+                        name = t.get('title') or ''
+                        break
+            except Exception:
+                pass
+        else:
+            name = 'General'
+        db.set_topic(chat_id, topic_id, name)
+        await c.message.edit_text(format_chat_info(chat_id),
+                                  reply_markup=get_chat_settings_keyboard(chat_id),
+                                  parse_mode=ParseMode.HTML)
+        await c.answer(f'🧵 Тема: {name or "General"}')
+
+    elif data.startswith('TOPIC_MANUAL:'):
+        chat_id = int(data.split(':')[1])
+        await state.set_data({'chat_id': chat_id, 'prompt_id': c.message.message_id})
+        await c.message.edit_text('Отправь ID темы (число из ссылки на тему) '
+                                  'или 0 / General для общей ленты:')
+        await state.set_state(topic_state.id)
+        await c.answer()
+
     elif data.startswith('CLEAR_ADDITIONAL:'):
         chat_id = int(data.split(':')[1])
         db.add_additional_text(chat_id, '')
@@ -1598,6 +1708,19 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         except Exception:
             pass
         await c.answer('📊 Отчёт выключен' if cur else '📊 Отчёт включён')
+
+    elif data == 'SET_TOGGLE_SYNC':
+        try:
+            cur = db.get_sync_slowmode() == 1
+        except Exception:
+            cur = True
+        db.set_sync_slowmode(0 if cur else 1)
+        text, kb = build_settings_card()
+        try:
+            await c.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+        await c.answer('🐢 Синх выключен' if cur else '🐢 КД впритык к слоумоду включён')
 
     elif data == 'SET_LOG_CHAT':
         await state.set_data({'prompt_id': c.message.message_id})
@@ -1872,6 +1995,49 @@ async def input_log_chat(m: Message, state: FSMContext):
         except Exception:
             pass
         await state.clear()
+
+
+@router.message(topic_state.id)
+async def input_topic_id(m: Message, state: FSMContext):
+    if await _deny_if_not_admin(m):
+        await state.clear()
+        return
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+    prompt = data.get('prompt_id')
+    await _clean_trigger(m)
+    if not chat_id:
+        await _edit_or_send(m.chat.id, prompt, 'Не найден ID чата.', back_to_chats_kb())
+        await state.clear()
+        return
+    raw = (m.text or '').strip()
+    if raw.lower() in ('general', 'общая', '0'):
+        db.set_topic(chat_id, 0, 'General')
+        await _edit_or_send(m.chat.id, prompt, '✅ Тема: General (общая лента).',
+                            back_to_chat_kb(chat_id))
+        await state.clear()
+        return
+    try:
+        topic_id = int(raw)
+        if topic_id <= 0:
+            raise ValueError()
+    except (ValueError, AttributeError):
+        await _edit_or_send(m.chat.id, prompt,
+                            '❌ Нужен числовой ID темы (или 0 для общей). Попробуй снова:')
+        return
+    name = ''
+    try:
+        for t in await user.get_forum_topics(chat_id):
+            if int(t['id']) == topic_id:
+                name = t.get('title') or ''
+                break
+    except Exception:
+        pass
+    db.set_topic(chat_id, topic_id, name)
+    await _edit_or_send(m.chat.id, prompt,
+                        f'✅ Тема: {html.escape(name) if name else f"#{topic_id}"}.',
+                        back_to_chat_kb(chat_id))
+    await state.clear()
 
 
 @router.message(addition.id)

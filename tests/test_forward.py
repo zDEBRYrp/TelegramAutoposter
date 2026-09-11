@@ -79,15 +79,15 @@ class FwdClient:
             raise RuntimeError('CHANNEL_PRIVATE')
         return True
 
-    async def send_message(self, chat_id, text, parse_mode=None):
+    async def send_message(self, chat_id, text, parse_mode=None, reply_to_message_id=None):
         self.calls.append(('msg', chat_id, text, parse_mode))
         return True
 
-    async def send_photo(self, chat_id, photo, caption=None, parse_mode=None):
+    async def send_photo(self, chat_id, photo, caption=None, parse_mode=None, reply_to_message_id=None):
         self.calls.append(('photo', chat_id, caption))
         return True
 
-    async def send_video(self, chat_id, video, caption=None, parse_mode=None):
+    async def send_video(self, chat_id, video, caption=None, parse_mode=None, reply_to_message_id=None):
         self.calls.append(('video', chat_id, caption))
         return True
 

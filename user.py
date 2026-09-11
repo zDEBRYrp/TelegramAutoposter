@@ -287,50 +287,62 @@ def _to_html(text: str) -> str:
         return text
 
 
-async def _send_with_fallback(chat_id: int, text: str, photo_path: str = None, video_path: str = None):
-    """Отправить медиа с fallback на текст если чат не поддерживает."""
+async def _send_with_fallback(chat_id: int, text: str, photo_path: str = None,
+                              video_path: str = None, topic: int = 0):
+    """Отправить медиа с fallback на текст если чат не поддерживает.
+    topic = id темы форума (0 = General): шлём ответом в топик."""
     from pyrogram.enums import ParseMode as PyroParseMode
 
     html_text = _to_html(text) if text else None
+    reply_to = int(topic) if topic else None
 
     if photo_path:
         found = _resolve_media(photo_path) or (photo_path if os.path.exists(photo_path) else None)
         if found:
             try:
-                await client.send_photo(chat_id, found, caption=html_text, parse_mode=PyroParseMode.HTML)
+                await client.send_photo(chat_id, found, caption=html_text,
+                                        parse_mode=PyroParseMode.HTML,
+                                        reply_to_message_id=reply_to)
                 return
             except Exception as e:
                 err = str(e).lower()
                 if any(x in err for x in ['chat_send_photos_forbidden', 'chat_send_media_forbidden', 'media', 'forbidden']):
                     logger.warning(f"Фото запрещено в {chat_id}, отправляю текст")
                     if html_text:
-                        await client.send_message(chat_id, html_text, parse_mode=PyroParseMode.HTML)
+                        await client.send_message(chat_id, html_text, parse_mode=PyroParseMode.HTML,
+                                                  reply_to_message_id=reply_to)
                     return
                 raise
         if html_text:
-            await client.send_message(chat_id, html_text, parse_mode=PyroParseMode.HTML)
+            await client.send_message(chat_id, html_text, parse_mode=PyroParseMode.HTML,
+                                      reply_to_message_id=reply_to)
         return
 
     if video_path:
         found = _resolve_media(video_path) or (video_path if os.path.exists(video_path) else None)
         if found:
             try:
-                await client.send_video(chat_id, found, caption=html_text, parse_mode=PyroParseMode.HTML)
+                await client.send_video(chat_id, found, caption=html_text,
+                                        parse_mode=PyroParseMode.HTML,
+                                        reply_to_message_id=reply_to)
                 return
             except Exception as e:
                 err = str(e).lower()
                 if any(x in err for x in ['chat_send_videos_forbidden', 'chat_send_media_forbidden', 'media', 'forbidden']):
                     logger.warning(f"Видео запрещено в {chat_id}, отправляю текст")
                     if html_text:
-                        await client.send_message(chat_id, html_text, parse_mode=PyroParseMode.HTML)
+                        await client.send_message(chat_id, html_text, parse_mode=PyroParseMode.HTML,
+                                                  reply_to_message_id=reply_to)
                     return
                 raise
         if html_text:
-            await client.send_message(chat_id, html_text, parse_mode=PyroParseMode.HTML)
+            await client.send_message(chat_id, html_text, parse_mode=PyroParseMode.HTML,
+                                      reply_to_message_id=reply_to)
         return
 
     if html_text:
-        await client.send_message(chat_id, html_text, parse_mode=PyroParseMode.HTML)
+        await client.send_message(chat_id, html_text, parse_mode=PyroParseMode.HTML,
+                                  reply_to_message_id=reply_to)
 
 
 FATAL_SEND_ERRORS = (
@@ -377,17 +389,20 @@ def register_send_result(db, chat_id: int, ok: bool, err: str) -> bool:
 
 
 async def _deliver(chat_id: int, text: str,
-                   photo_path: str = None, video_path: str = None, fwd=None):
+                   photo_path: str = None, video_path: str = None, fwd=None, topic: int = 0):
     """Отправка без исключений наружу (кроме FloodWait/Cancelled).
     Возвращает (ok, error). При битой HTML-разметке — повтор plain-текстом.
     fwd = (from_chat_id, message_id): переслать как есть (премиум-эмодзи целы),
-    текст следом отдельным сообщением."""
+    текст следом отдельным сообщением. topic = тема форума (0 = General)."""
     if not text and not photo_path and not video_path and not fwd:
         return True, ''
     if fwd is not None:
         try:
             fwd_ids = fwd[1] if isinstance(fwd[1], list) else [fwd[1]]
-            await client.forward_messages(chat_id, fwd[0], fwd_ids)
+            if topic:
+                await _forward_to_topic(chat_id, fwd[0], fwd_ids, int(topic))
+            else:
+                await client.forward_messages(chat_id, fwd[0], fwd_ids)
         except (FloodWait, asyncio.CancelledError):
             raise
         except Exception as e:
@@ -396,7 +411,8 @@ async def _deliver(chat_id: int, text: str,
             return True, ''
         photo_path = video_path = None
     try:
-        await _send_with_fallback(chat_id, text, photo_path=photo_path, video_path=video_path)
+        await _send_with_fallback(chat_id, text, photo_path=photo_path, video_path=video_path,
+                                  topic=topic)
         return True, ''
     except (FloodWait, asyncio.CancelledError):
         raise
@@ -406,11 +422,12 @@ async def _deliver(chat_id: int, text: str,
             try:
                 plain = strip_html_tags(text)
                 if photo_path:
-                    await _send_with_fallback(chat_id, plain, photo_path=photo_path)
+                    await _send_with_fallback(chat_id, plain, photo_path=photo_path, topic=topic)
                 elif video_path:
-                    await _send_with_fallback(chat_id, plain, video_path=video_path)
+                    await _send_with_fallback(chat_id, plain, video_path=video_path, topic=topic)
                 elif plain:
-                    await client.send_message(chat_id, plain)
+                    await client.send_message(chat_id, plain,
+                                              reply_to_message_id=int(topic) if topic else None)
                 return True, ''
             except (FloodWait, asyncio.CancelledError):
                 raise
@@ -423,11 +440,12 @@ SEND_STAGGER_SEC = 5  # пауза между отправками в РАЗНЫ
 POLL_STEP_SEC = 15  # гранулярность проверки флага/расписания
 SEND_ATTEMPTS = 3  # попыток отправки в чат подряд
 RETRY_DELAY_SEC = 10  # пауза между попытками в один чат
+SLOWMODE_TTL = 3600  # как часто перепроверяем слоумод канала (сек)
 
 
 async def _send_with_retries(chat_id: int, text: str,
                              photo_path: str = None, video_path: str = None,
-                             fwd=None, attempts: int = SEND_ATTEMPTS):
+                             fwd=None, topic: int = 0, attempts: int = SEND_ATTEMPTS):
     """Пробуем отправить несколько раз подряд (FloodWait/отмена — наружу).
     Фатальные ошибки не ретраим (бессмысленно). Возвращает (ok, err, tries)."""
     last_err = ''
@@ -435,7 +453,7 @@ async def _send_with_retries(chat_id: int, text: str,
     for n in range(max(1, attempts)):
         tries += 1
         try:
-            ok, err = await _deliver(chat_id, text, photo_path, video_path, fwd)
+            ok, err = await _deliver(chat_id, text, photo_path, video_path, fwd, topic)
         except (FloodWait, asyncio.CancelledError):
             raise
         if ok:
@@ -544,6 +562,100 @@ async def _log_send(db, chat: Dict[str, Any], text: str,
         raise
     except Exception as e:
         logger.warning(f"Не смог записать в лог-чат {dest}: {e}")
+
+
+def _effective_delay(user_minutes, slow_sec: int, sync_on: bool) -> int:
+    """Итоговая пауза в секундах: КД юзера, но не короче слоумода канала
+    (если включён SYNC). «Впритык» — ровно max из двух."""
+    try:
+        base = max(1, int(user_minutes or 5)) * 60
+    except (TypeError, ValueError):
+        base = 5 * 60
+    try:
+        slow = int(slow_sec or 0)
+    except (TypeError, ValueError):
+        slow = 0
+    if sync_on and slow > base:
+        return slow
+    return base
+
+
+async def get_channel_slowmode(chat_id: int, db) -> int:
+    """Слоумод канала в секундах (0 = нет). Кэшируем в БД на SLOWMODE_TTL.
+    Определяем через GetFullChannel — код сам видит КД канала."""
+    cached, at = 0, 0.0
+    try:
+        cached, at = db.get_slowmode(chat_id)
+    except Exception:
+        pass
+    if at and _time.time() - at < SLOWMODE_TTL:
+        return cached
+    if not await ensure_connected():
+        return cached
+    try:
+        from pyrogram import raw
+        peer = await client.resolve_peer(chat_id)
+        full = await client.invoke(raw.functions.channels.GetFullChannel(channel=peer))
+        sec = int(getattr(full.full_chat, 'slowmode_seconds', 0) or 0)
+    except Exception as e:
+        logger.error(f"Не смог прочитать слоумод {chat_id}: {e}")
+        return cached
+    try:
+        db.set_slowmode(chat_id, sec)
+    except Exception:
+        pass
+    if sec != cached:
+        logger.info(f"Слоумод {chat_id}: {sec}с")
+    return sec
+
+
+async def get_forum_topics(chat_id: int):
+    """Темы форума-группы: [{'id': top_msg_id, 'title': ...}].
+    Пустой список = не форум или только General. Бросает исключение
+    с понятным текстом, если прочитать нельзя."""
+    if not await ensure_connected():
+        raise RuntimeError('Pyrogram не подключён')
+    try:
+        from pyrogram import raw
+        peer = await client.resolve_peer(chat_id)
+        res = await client.invoke(raw.functions.channels.GetForumTopics(
+            channel=peer, offset_date=0, offset_id=0, offset_topic=0,
+            limit=100))
+    except Exception as e:
+        raise RuntimeError(f'Темы не читаются: {e}')
+    topics = []
+    try:
+        raw_topics = getattr(res, 'topics', []) or []
+    except Exception:
+        raw_topics = []
+    for t in raw_topics:
+        try:
+            tid = int(getattr(t, 'top_message', 0) or getattr(t, 'id', 0) or 0)
+            title = str(getattr(t, 'title', '') or '')
+        except Exception:
+            continue
+        if tid > 0:
+            topics.append({'id': tid, 'title': title})
+    return topics
+
+
+async def _forward_to_topic(chat_id: int, from_chat_id: int, message_ids, topic_id: int):
+    """Форвард в конкретную тему форума (raw: top_msg_id)."""
+    from pyrogram import raw
+    import random as _random
+    mids = list(message_ids) if isinstance(message_ids, list) else [message_ids]
+    try:
+        random_ids = [client.rnd_id() for _ in mids]
+    except Exception:
+        random_ids = [_random.getrandbits(63) for _ in mids]
+    return await client.invoke(
+        raw.functions.messages.ForwardMessages(
+            to_peer=await client.resolve_peer(chat_id),
+            from_peer=await client.resolve_peer(from_chat_id),
+            id=mids,
+            top_msg_id=int(topic_id),
+            random_id=random_ids,
+        ))
 
 
 def load_schedule(db, ids) -> Dict[int, float]:
@@ -727,9 +839,25 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                         per_chat = None
                     timeout = per_chat if per_chat and per_chat >= 1 else default_timeout
 
+                    # Тема форума (0 = General) и слоумод канала (КД впритык)
+                    try:
+                        topic_id, _topic_name = db.get_topic(chat['id'])
+                    except Exception:
+                        topic_id = 0
+                    try:
+                        topic_id = int(topic_id or 0)
+                    except (TypeError, ValueError):
+                        topic_id = 0
+                    slow = await get_channel_slowmode(chat['id'], db)
+                    try:
+                        sync_on = db.get_sync_slowmode() == 1
+                    except Exception:
+                        sync_on = True
+                    delay = _effective_delay(timeout, slow, sync_on)
+
                     try:
                         ok, err, tries = await _send_with_retries(
-                            chat['id'], text, photo_path, video_path, fwd=fwd)
+                            chat['id'], text, photo_path, video_path, fwd=fwd, topic=topic_id)
                     except FloodWait as e:
                         wait = int(getattr(e, 'value', 30) or 30)
                         logger.warning(f"FloodWait {wait}s для {chat['id']}, повтор позже")
@@ -738,7 +866,7 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                         next_at[chat['id']] = _time.time() + wait
                         save_schedule(db, chat['id'], next_at[chat['id']])
                         continue
-                    next_at[chat['id']] = _time.time() + timeout * 60
+                    next_at[chat['id']] = _time.time() + delay
                     save_schedule(db, chat['id'], next_at[chat['id']])
                     disabled = register_send_result(db, chat['id'], ok, err)
                     if not ok:
@@ -747,7 +875,10 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                             await notify_admin(
                                 f'⛔ Чат {chat["id"]} выключен из рассылки: {err}')
                     else:
-                        logger.info(f"Отправлено в {chat['id']} с {tries} попытки, следующее через {timeout} мин.")
+                        logger.info(f"Отправлено в {chat['id']} с {tries} попытки, "
+                                    f"следующее через {delay}с"
+                                    + (f" (тема {topic_id})" if topic_id else "")
+                                    + (f" [слоумод {slow}с]" if sync_on and slow * 1.0 > timeout * 60 else ""))
                         try:
                             await _log_send(db, chat, text, photo_path, video_path, fwd=fwd)
                         except asyncio.CancelledError:
