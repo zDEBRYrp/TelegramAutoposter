@@ -9,7 +9,7 @@ from sqliter import DBConnection
 
 def test_toggle_style_semantics():
     assert main._toggle_style(True) == ButtonStyle.SUCCESS  # включено — зелёный
-    assert main._toggle_style(False) is None  # выключено — серый
+    assert main._toggle_style(False) == ButtonStyle.DANGER  # выключено — красный
 
 
 def test_reply_keyboards_colored():
@@ -48,7 +48,7 @@ def test_chat_list_toggle_colors():
         toggles = {b.callback_data: b for row in kb.inline_keyboard[1:]
                    for b in row if b.callback_data.startswith('TOGGLE_SPAM:')}
         assert toggles['TOGGLE_SPAM:-1:0:all'].style == ButtonStyle.SUCCESS
-        assert toggles['TOGGLE_SPAM:-2:0:all'].style is None
+        assert toggles['TOGGLE_SPAM:-2:0:all'].style == ButtonStyle.DANGER
         add = [b for row in kb.inline_keyboard for b in row
                if b.callback_data == 'ADD_CHAT'][0]
         assert add.style == ButtonStyle.SUCCESS

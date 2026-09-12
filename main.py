@@ -458,23 +458,23 @@ def build_settings_card() -> tuple[str, InlineKeyboardMarkup]:
     log_target = _display(str(log_chat), 24) if log_chat else '— не выбран —'
     lines = [
         '<b>⚙️ Настройки</b>',
-        f'📤 Лог отправок: {"✅ вкл" if log_on else "⬜ выкл"} → {log_target}',
-        f'📊 Отчёт о старте: {"✅ вкл" if report_on else "⬜ выкл"}',
-        f'🐢 КД впритык к слоумоду: {"✅ вкл" if sync_on else "⬜ выкл"}',
+        f'📤 Лог отправок: {"✅ вкл" if log_on else "❌ выкл"} → {log_target}',
+        f'📊 Отчёт о старте: {"✅ вкл" if report_on else "❌ выкл"}',
+        f'🐢 КД впритык к слоумоду: {"✅ вкл" if sync_on else "❌ выкл"}',
         f'💬 Чаты: {active} активно из {total}',
     ]
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
-            text=f'📤 Лог отправок: {"✅" if log_on else "⬜"}',
+            text=f'📤 Лог отправок: {"✅" if log_on else "❌"}',
             callback_data='SET_TOGGLE_LOG',
             style=_toggle_style(bool(log_on)))],
         [InlineKeyboardButton(text=f'📋 Лог-чат: {log_target}', callback_data='SET_LOG_CHAT')],
         [InlineKeyboardButton(
-            text=f'📊 Отчёт о старте: {"✅" if report_on else "⬜"}',
+            text=f'📊 Отчёт о старте: {"✅" if report_on else "❌"}',
             callback_data='SET_TOGGLE_REPORT',
             style=_toggle_style(bool(report_on)))],
         [InlineKeyboardButton(
-            text=f'🐢 КД впритык: {"✅" if sync_on else "⬜"}',
+            text=f'🐢 КД впритык: {"✅" if sync_on else "❌"}',
             callback_data='SET_TOGGLE_SYNC',
             style=_toggle_style(sync_on))],
         [InlineKeyboardButton(text='✅ Включить все', callback_data='SET_ALL_ON',
@@ -521,8 +521,8 @@ def spam_running_keyboard():
 
 
 def _toggle_style(is_on: bool):
-    """Цвет тумблера по СОСТОЯНИЮ: включено — зелёный, выключено — серый."""
-    return ButtonStyle.SUCCESS if is_on else None
+    """Цвет тумблера по СОСТОЯНИЮ: включено — зелёный, выключено — красный."""
+    return ButtonStyle.SUCCESS if is_on else ButtonStyle.DANGER
 
 
 def _page_indicator(text: str) -> InlineKeyboardButton:
@@ -592,7 +592,7 @@ def channel_post_keyboard():
 
 def get_chat_settings_keyboard(chat_id):
     spam_status = db.get_channel_spam_status(chat_id)
-    spam_text = '✅ Рассылка ВКЛ — выключить' if spam_status == 1 else '⬜ Рассылка ВЫКЛ — включить'
+    spam_text = '✅ Рассылка ВКЛ — выключить' if spam_status == 1 else '❌ Рассылка ВЫКЛ — включить'
     try:
         timeout_val = db.get_channel_timeout(chat_id)
     except Exception:
@@ -623,7 +623,7 @@ def get_chat_settings_keyboard(chat_id):
         # Темы — только где есть ветки
         rows.append([InlineKeyboardButton(text=f'🧵 Тема: {_short(topic_label, 20)}',
                                           callback_data=f'TOPIC:{chat_id}')])
-    rows.append([InlineKeyboardButton(text=f'👥 Отмечать всех: {"✅" if tag_on else "⬜"}',
+    rows.append([InlineKeyboardButton(text=f'👥 Отмечать всех: {"✅" if tag_on else "❌"}',
                                       callback_data=f'TOGGLE_TAG:{chat_id}',
                                       style=_toggle_style(tag_on))])
     if slow:
@@ -633,7 +633,7 @@ def get_chat_settings_keyboard(chat_id):
         except Exception:
             chat_sync = True
         rows.append([InlineKeyboardButton(
-            text=f'🐢 Впритык к КД ({slow}с): {"✅" if chat_sync else "⬜"}',
+            text=f'🐢 Впритык к КД ({slow}с): {"✅" if chat_sync else "❌"}',
             callback_data=f'TOGGLE_SYNC:{chat_id}',
             style=_toggle_style(chat_sync))])
     rows += [
@@ -755,10 +755,10 @@ def format_chat_info(chat_id: int) -> str:
         else:
             slow_line = f'\n🐢 Слоумод: {slow}с{checked} (впритык выкл)'
     return (f'💬 <b>Чат {chat_id}</b>\n'
-            f'{"✅ Рассылка включена" if spam_status == 1 else "⬜ Рассылка выключена"}\n'
+            f'{"✅ Рассылка включена" if spam_status == 1 else "❌ Рассылка выключена"}\n'
             f'⏱ Интервал: {timeout_val} мин.{slow_line}\n'
             + (f'🧵 Тема: {topic_desc}\n' if is_forum else '') +
-            f'👥 Отметки: {"✅ всех" if tag_on else "⬜ выкл"}\n'
+            f'👥 Отметки: {"✅ всех" if tag_on else "❌ выкл"}\n'
             f'{_next_send_line(chat_id)}\n'
             f'💬 Доп. текст: {addit_val}\n'
             f'📝 Пост: {post_desc}\n'
@@ -858,7 +858,7 @@ async def get_chats_keyboard(page=0, filt='all', select_mode=False, selected=fro
             keyboard.append([
                 InlineKeyboardButton(text=f'✅ Вкл ({len(selected)})', callback_data='MULTI_ON',
                                      style=ButtonStyle.SUCCESS),
-                InlineKeyboardButton(text=f'⬜ Выкл ({len(selected)})', callback_data='MULTI_OFF',
+                InlineKeyboardButton(text=f'❌ Выкл ({len(selected)})', callback_data='MULTI_OFF',
                                      style=ButtonStyle.DANGER),
             ])
             keyboard.append([
@@ -880,13 +880,13 @@ async def get_chats_keyboard(page=0, filt='all', select_mode=False, selected=fro
             text=f'{"● " if filt == "on" else ""}✅ Вкл ({active})',
             callback_data='CHATS_FILTER:on'),
         InlineKeyboardButton(
-            text=f'{"● " if filt == "off" else ""}⬜ Выкл ({off_count})',
+            text=f'{"● " if filt == "off" else ""}❌ Выкл ({off_count})',
             callback_data='CHATS_FILTER:off'),
     ]
     keyboard.append(tabs)
     for chat in page_chats:
         spam_status = statuses.get(str(chat['id']), 0)
-        icon = '✅' if spam_status == 1 else '⬜'
+        icon = '✅' if spam_status == 1 else '❌'
         keyboard.append([
             InlineKeyboardButton(
                 text=f'{icon} {chat["title"]}',
@@ -1086,7 +1086,7 @@ async def send_info(message: Message):
     await message.answer(
         f'ℹ️ <b>Autoposter {version}</b>\n'
         f'Обновление: {upd}\n'
-        f'📝 Рассылка: {"✅ запущена" if spam == 1 else "⬜ остановлена"}\n'
+        f'📝 Рассылка: {"✅ запущена" if spam == 1 else "❌ остановлена"}\n'
         f'💬 Чаты: {active} активно из {total}'
         f'{send_lines}\n\nSupport: @support')
 
@@ -1134,7 +1134,7 @@ def build_global_post_card() -> tuple[str, InlineKeyboardMarkup]:
     if not (has_photo or has_video or has_fwd or text):
         lines.append('❌ Пост пуст')
     lines.append(f'⏱ Интервал по умолчанию: {timeout} мин.')
-    lines.append(f'{"✅ Рассылка запущена" if spam == 1 else "⬜ Рассылка остановлена"}')
+    lines.append(f'{"✅ Рассылка запущена" if spam == 1 else "❌ Рассылка остановлена"}')
 
     keyboard_rows = []
     if has_photo or has_video or has_fwd or text:
@@ -1450,7 +1450,7 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         current = db.get_channel_spam_status(chat_id)
         if current == 1:
             db.stop_spam_for_channel(chat_id)
-            toast = '⬜ Рассылка выключена'
+            toast = '❌ Рассылка выключена'
         else:
             db.c.execute('UPDATE CHANNELS SET SPAM_ENABLED = 1 WHERE CHANNEL = ?', [str(chat_id)])
             db.conn.commit()
@@ -1513,7 +1513,7 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
             await c.answer('Ничего не выбрано', show_alert=True)
             return
         n = db.set_spam_many(sel, 1 if data == 'MULTI_ON' else 0)
-        await c.answer(f'{"✅ Включено" if data == "MULTI_ON" else "⬜ Выключено"}: {n}')
+        await c.answer(f'{"✅ Включено" if data == "MULTI_ON" else "❌ Выключено"}: {n}')
         await _render_select(c, 0, 'all')
 
     elif data in ('MULTI_TAG_ON', 'MULTI_TAG_OFF'):

@@ -84,7 +84,7 @@ def test_keyboard_uses_bulk_statuses(monkeypatch):
         assert 'активно 1 из 2' in header
         toggles = [b.text for row in kb.inline_keyboard[1:]
                    for b in row if b.callback_data.startswith('TOGGLE_SPAM:')]
-        assert toggles[0].startswith('✅') and toggles[1].startswith('⬜')
+        assert toggles[0].startswith('✅') and toggles[1].startswith('❌')
     finally:
         main.db = old
 
