@@ -5,10 +5,11 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram import Router, F
 from aiogram.enums import ParseMode
+from aiogram.enums import ButtonStyle
 from aiogram.exceptions import TelegramBadRequest, TelegramConflictError, TelegramNetworkError
 from aiogram.types import (
     Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton, ErrorEvent
+    InlineKeyboardMarkup, InlineKeyboardButton, ErrorEvent, DisabledButton
 )
 
 import html
@@ -438,16 +439,21 @@ def build_settings_card() -> tuple[str, InlineKeyboardMarkup]:
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
             text=f'📤 Лог отправок: {"✅" if log_on else "⬜"}',
-            callback_data='SET_TOGGLE_LOG')],
+            callback_data='SET_TOGGLE_LOG',
+            style=_toggle_style(bool(log_on)))],
         [InlineKeyboardButton(text=f'📋 Лог-чат: {log_target}', callback_data='SET_LOG_CHAT')],
         [InlineKeyboardButton(
             text=f'📊 Отчёт о старте: {"✅" if report_on else "⬜"}',
-            callback_data='SET_TOGGLE_REPORT')],
+            callback_data='SET_TOGGLE_REPORT',
+            style=_toggle_style(bool(report_on)))],
         [InlineKeyboardButton(
             text=f'🐢 КД впритык: {"✅" if sync_on else "⬜"}',
-            callback_data='SET_TOGGLE_SYNC')],
-        [InlineKeyboardButton(text='✅ Включить все', callback_data='SET_ALL_ON'),
-         InlineKeyboardButton(text='⛔ Выключить все', callback_data='SET_ALL_OFF')],
+            callback_data='SET_TOGGLE_SYNC',
+            style=_toggle_style(sync_on))],
+        [InlineKeyboardButton(text='✅ Включить все', callback_data='SET_ALL_ON',
+                              style=ButtonStyle.SUCCESS),
+         InlineKeyboardButton(text='⛔ Выключить все', callback_data='SET_ALL_OFF',
+                              style=ButtonStyle.DANGER)],
         [InlineKeyboardButton(text='♻️ Обновить список чатов', callback_data='SET_REFRESH_CHATS'),
          InlineKeyboardButton(text='🧹 Сбросить статусы', callback_data='SET_CLEAR_STATUS')],
         [InlineKeyboardButton(text='❌ Закрыть', callback_data='SETTINGS_CLOSE')],
@@ -471,7 +477,7 @@ BTN_CADD = '➕ Новый пост'
 
 def welcome_keyboard():
     return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text=BTN_START)],
+        [KeyboardButton(text=BTN_START, style=ButtonStyle.PRIMARY)],
         [KeyboardButton(text=BTN_POST), KeyboardButton(text=BTN_CHATS)],
         [KeyboardButton(text=BTN_CPOSTS), KeyboardButton(text=BTN_SETTINGS)],
         [KeyboardButton(text=BTN_INFO), KeyboardButton(text=BTN_UPDATE)]
@@ -480,11 +486,21 @@ def welcome_keyboard():
 
 def spam_running_keyboard():
     return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text=BTN_STOP)],
+        [KeyboardButton(text=BTN_STOP, style=ButtonStyle.DANGER)],
         [KeyboardButton(text=BTN_POST), KeyboardButton(text=BTN_CHATS)],
         [KeyboardButton(text=BTN_CPOSTS), KeyboardButton(text=BTN_SETTINGS)],
         [KeyboardButton(text=BTN_INFO)]
     ], resize_keyboard=True)
+
+
+def _toggle_style(currently_on: bool):
+    """Цвет кнопки-тоггла по действию: включает → зелёная, выключает → красная."""
+    return ButtonStyle.SUCCESS if not currently_on else ButtonStyle.DANGER
+
+
+def _page_indicator(text: str) -> InlineKeyboardButton:
+    """Некликаемый серый индикатор страницы (Bot API 10.3 disabled)."""
+    return InlineKeyboardButton(text=text, callback_data='PAGINATION', disabled=DisabledButton())
 
 
 def _send_state_line(chat_id: int) -> str:
@@ -564,7 +580,8 @@ def get_chat_settings_keyboard(chat_id):
     except Exception:
         slow = 0
     rows = [
-        [InlineKeyboardButton(text=spam_text, callback_data=f'TOGGLE_SPAM_SETTINGS:{chat_id}')],
+        [InlineKeyboardButton(text=spam_text, callback_data=f'TOGGLE_SPAM_SETTINGS:{chat_id}',
+                              style=_toggle_style(spam_status == 1))],
         [InlineKeyboardButton(text='📝 Пост чата', callback_data=f'EDIT_CHANNEL_POST:{chat_id}')],
         [InlineKeyboardButton(text=f'🧵 Тема: {_short(topic_label, 20)}', callback_data=f'TOPIC:{chat_id}')],
     ]
@@ -576,7 +593,8 @@ def get_chat_settings_keyboard(chat_id):
             chat_sync = True
         rows.append([InlineKeyboardButton(
             text=f'🐢 Впритык к КД ({slow}с): {"✅" if chat_sync else "⬜"}',
-            callback_data=f'TOGGLE_SYNC:{chat_id}')])
+            callback_data=f'TOGGLE_SYNC:{chat_id}',
+            style=_toggle_style(chat_sync))])
     rows += [
         [InlineKeyboardButton(text=f'⏱ Интервал: {timeout_val} мин.', callback_data=f'CHANGE_TIMEOUT:{chat_id}')],
         [InlineKeyboardButton(text='💬 Доп. текст', callback_data=f'ADD_ADDITIONAL:{chat_id}')],
@@ -584,7 +602,8 @@ def get_chat_settings_keyboard(chat_id):
     try:
         addit = db.get_additional_text(chat_id)
         if addit and addit[0]:
-            rows.append([InlineKeyboardButton(text='🗑 Убрать доп. текст', callback_data=f'CLEAR_ADDITIONAL:{chat_id}')])
+            rows.append([InlineKeyboardButton(text='🗑 Убрать доп. текст', callback_data=f'CLEAR_ADDITIONAL:{chat_id}',
+                                              style=ButtonStyle.DANGER)])
     except Exception:
         pass
     rows.append([InlineKeyboardButton(text='⬅️ К чатам', callback_data='BACK_TO_CHATS')])
@@ -766,7 +785,8 @@ async def get_chats_keyboard(page=0, filt='all'):
         keyboard.append([
             InlineKeyboardButton(
                 text=f'{icon} {chat["title"]}',
-                callback_data=f'TOGGLE_SPAM:{chat["id"]}:{page}:{filt}'
+                callback_data=f'TOGGLE_SPAM:{chat["id"]}:{page}:{filt}',
+                style=_toggle_style(spam_status == 1)
             ),
             InlineKeyboardButton(text='⚙️', callback_data=f'EDIT_CHAT:{chat["id"]}')
         ])
@@ -775,12 +795,13 @@ async def get_chats_keyboard(page=0, filt='all'):
         pagination = []
         if page > 0:
             pagination.append(InlineKeyboardButton(text='⬅️', callback_data=f'CHATS_PAGE:{page-1}:{filt}'))
-        pagination.append(InlineKeyboardButton(text=f'{page+1}/{total_pages}', callback_data='PAGINATION'))
+        pagination.append(_page_indicator(f'{page+1}/{total_pages}'))
         if page < total_pages - 1:
             pagination.append(InlineKeyboardButton(text='➡️', callback_data=f'CHATS_PAGE:{page+1}:{filt}'))
         keyboard.append(pagination)
 
-    keyboard.append([InlineKeyboardButton(text='➕ Добавить чат', callback_data='ADD_CHAT')])
+    keyboard.append([InlineKeyboardButton(text='➕ Добавить чат', callback_data='ADD_CHAT',
+                                          style=ButtonStyle.SUCCESS)])
     return InlineKeyboardMarkup(inline_keyboard=keyboard), chats_header(total, active, filt)
 
 
@@ -1007,7 +1028,8 @@ def build_global_post_card() -> tuple[str, InlineKeyboardMarkup]:
 
     keyboard_rows = []
     if has_photo or has_video or has_fwd or text:
-        keyboard_rows.append([InlineKeyboardButton(text='👁 Просмотреть пост', callback_data='VIEW_GLOBAL_POST')])
+        keyboard_rows.append([InlineKeyboardButton(text='👁 Просмотреть пост', callback_data='VIEW_GLOBAL_POST',
+                                                   style=ButtonStyle.PRIMARY)])
     keyboard_rows.append([InlineKeyboardButton(
         text=f'📝 Текст {"✅" if text else ""}', callback_data='EDIT_TEXT')])
     keyboard_rows.append([
@@ -1017,7 +1039,8 @@ def build_global_post_card() -> tuple[str, InlineKeyboardMarkup]:
     keyboard_rows.append([InlineKeyboardButton(
         text=f'📨 Пересылка {"✅" if has_fwd else ""}', callback_data='EDIT_FORWARD')])
     if has_photo or has_video or has_fwd:
-        keyboard_rows.append([InlineKeyboardButton(text='🗑 Убрать медиа', callback_data='DEL_MEDIA')])
+        keyboard_rows.append([InlineKeyboardButton(text='🗑 Убрать медиа', callback_data='DEL_MEDIA',
+                                                   style=ButtonStyle.DANGER)])
     keyboard_rows.append([InlineKeyboardButton(text=f'⏱ Интервал: {timeout} мин.', callback_data='INTERVAL')])
 
     return '\n'.join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
@@ -1223,8 +1246,10 @@ async def handle_password_input(m: Message, state: FSMContext):
         return
     user.login_password = password
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='✅ Подтвердить', callback_data='password_enter')],
-        [InlineKeyboardButton(text='❌ Отмена', callback_data='password_cancel')],
+        [InlineKeyboardButton(text='✅ Подтвердить', callback_data='password_enter',
+                              style=ButtonStyle.SUCCESS)],
+        [InlineKeyboardButton(text='❌ Отмена', callback_data='password_cancel',
+                              style=ButtonStyle.DANGER)],
     ])
     # убираем прошлое окно подтверждения, если пароль вводят повторно
     try:
@@ -1411,13 +1436,14 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         for ch in new_chats[page * per_page:(page + 1) * per_page]:
             rows.append([InlineKeyboardButton(
                 text=f'➕ {ch["title"]}',
-                callback_data=f'ADD_CHAT_FROM_DIALOG:{ch["id"]}'
+                callback_data=f'ADD_CHAT_FROM_DIALOG:{ch["id"]}',
+                style=ButtonStyle.SUCCESS
             )])
         if total_pages > 1:
             nav = []
             if page > 0:
                 nav.append(InlineKeyboardButton(text='⬅️', callback_data=f'DIALOGS_PAGE:{page-1}'))
-            nav.append(InlineKeyboardButton(text=f'{page+1}/{total_pages}', callback_data='PAGINATION'))
+            nav.append(_page_indicator(f'{page+1}/{total_pages}'))
             if page < total_pages - 1:
                 nav.append(InlineKeyboardButton(text='➡️', callback_data=f'DIALOGS_PAGE:{page+1}'))
             rows.append(nav)
@@ -1536,12 +1562,14 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
             has_fwd = False
         has_post = has_photo or has_video or has_text or has_fwd
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text='👁 Посмотреть пост', callback_data=f'VIEW_CHANNEL_POST:{chat_id}')] if has_post else [],
+            [InlineKeyboardButton(text='👁 Посмотреть пост', callback_data=f'VIEW_CHANNEL_POST:{chat_id}',
+                                  style=ButtonStyle.PRIMARY)] if has_post else [],
             [InlineKeyboardButton(text=f'📝 Текст {"✅" if has_text else ""}', callback_data=f'CHANNEL_EDIT_TEXT:{chat_id}')],
             [InlineKeyboardButton(text=f'📷 Фото {"✅" if has_photo else ""}', callback_data=f'CHANNEL_EDIT_PHOTO:{chat_id}'),
              InlineKeyboardButton(text=f'📹 Видео {"✅" if has_video else ""}', callback_data=f'CHANNEL_EDIT_VIDEO:{chat_id}')],
             [InlineKeyboardButton(text=f'📨 Пересылка {"✅" if has_fwd else ""}', callback_data=f'CHANNEL_EDIT_FORWARD:{chat_id}')],
-            [InlineKeyboardButton(text='🗑 Очистить пост', callback_data=f'CHANNEL_CLEAR:{chat_id}')] if has_post else [],
+            [InlineKeyboardButton(text='🗑 Очистить пост', callback_data=f'CHANNEL_CLEAR:{chat_id}',
+                                  style=ButtonStyle.DANGER)] if has_post else [],
             [InlineKeyboardButton(text='⬅️ К чату', callback_data=f'EDIT_CHAT:{chat_id}')]
         ])
         # убираем пустые строки
@@ -1775,7 +1803,8 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
             await c.message.edit_text(
                 f'Включить рассылку сразу во <b>все {total}</b> чатов?',
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text='✅ Да, включить все', callback_data='SET_ALL_ON_YES')],
+                    [InlineKeyboardButton(text='✅ Да, включить все', callback_data='SET_ALL_ON_YES',
+                                          style=ButtonStyle.SUCCESS)],
                     [InlineKeyboardButton(text='⬅️ К настройкам', callback_data='SETTINGS_BACK')],
                 ]),
                 parse_mode=ParseMode.HTML)
@@ -1801,7 +1830,8 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
             await c.message.edit_text(
                 f'Выключить рассылку во <b>всех {total}</b> чатах?',
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text='⛔ Да, выключить все', callback_data='SET_ALL_OFF_YES')],
+                    [InlineKeyboardButton(text='⛔ Да, выключить все', callback_data='SET_ALL_OFF_YES',
+                                          style=ButtonStyle.DANGER)],
                     [InlineKeyboardButton(text='⬅️ К настройкам', callback_data='SETTINGS_BACK')],
                 ]),
                 parse_mode=ParseMode.HTML)
@@ -2412,7 +2442,8 @@ async def handle_phone_input(m: Message, state: FSMContext):
              InlineKeyboardButton(text='9', callback_data='code_9')],
             [InlineKeyboardButton(text='⌫', callback_data='code_back'),
              InlineKeyboardButton(text='0', callback_data='code_0'),
-             InlineKeyboardButton(text='Войти', callback_data='code_enter')]
+             InlineKeyboardButton(text='Войти', callback_data='code_enter',
+                                  style=ButtonStyle.SUCCESS)]
         ])
         msg = await m.answer(CODE_PROMPT.format(code=''), reply_markup=keyboard)
         user.code_messages[m.chat.id] = msg.message_id
@@ -2500,7 +2531,8 @@ async def do_update_menu(chat_id):
         return
     if check["update_available"]:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text='Обновить', callback_data='update_confirm')],
+            [InlineKeyboardButton(text='Обновить', callback_data='update_confirm',
+                                  style=ButtonStyle.SUCCESS)],
             [InlineKeyboardButton(text='Отмена', callback_data='update_cancel')]
         ])
         await bot.send_message(chat_id,
