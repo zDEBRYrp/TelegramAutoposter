@@ -85,6 +85,25 @@ def test_build_mentions(monkeypatch):
     assert stub.warmed == [[11, 22]]  # пиры прогреты
 
 
+def test_mentions_capped_at_five(monkeypatch):
+    # Telegram уведомляет только о первых ~5 упоминаниях — больше не пихаем
+    assert user.TAG_LIMIT == 5
+    stub = TagClient([_member(i) for i in range(1, 20)])
+    monkeypatch.setattr(user, 'client', stub)
+    monkeypatch.setattr(user, '_tag_cache', {})
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(user, 'ensure_connected', AsyncMock(return_value=True))
+
+    class DB:
+        def get_tag_all(self, cid):
+            return 1
+
+    out = run(user.build_mentions(-100, DB()))
+    assert out.count('tg://user?id=') == 5
+    for i in range(1, 6):
+        assert f'tg://user?id={i}' in out
+
+
 def test_build_mentions_off_or_empty(monkeypatch):
     from unittest.mock import AsyncMock
     monkeypatch.setattr(user, 'ensure_connected', AsyncMock(return_value=True))
