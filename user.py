@@ -688,6 +688,63 @@ async def get_channel_slowmode(chat_id: int, db) -> int:
     return sec
 
 
+FORUM_TTL = 24 * 3600  # как часто перепроверяем флаг форума (сек)
+
+
+async def detect_forum(chat_id: int):
+    """Форум ли чат: True/False/None (неизвестно — сеть упала и т.п.).
+    Смотрим флаг forum у Channel; обычные группы — сразу False без запросов."""
+    if not await ensure_connected():
+        return None
+    try:
+        from pyrogram import raw
+        peer = await client.resolve_peer(chat_id)
+    except (FloodWait, asyncio.CancelledError):
+        raise
+    except Exception as e:
+        logger.error(f"Не смог резолвить пир {chat_id}: {e}")
+        return None
+    if not isinstance(peer, raw.types.InputPeerChannel):
+        return False
+    try:
+        res = await client.invoke(raw.functions.channels.GetChannels(id=[peer]))
+    except (FloodWait, asyncio.CancelledError):
+        raise
+    except Exception as e:
+        logger.error(f"Не смог прочитать флаг форума {chat_id}: {e}")
+        return None
+    try:
+        chats = getattr(res, 'chats', []) or []
+        if not chats:
+            return None
+        return bool(getattr(chats[0], 'forum', False))
+    except Exception:
+        return None
+
+
+async def refresh_forum_flag(chat_id: int, db, force: bool = False):
+    """Обновить флаг форума в БД (пишем только точный ответ, не 'не знаю')."""
+    try:
+        _is_forum, _at = db.get_forum(chat_id)
+    except Exception:
+        _is_forum, _at = 1, 0.0
+    if not force and _at and _time.time() - _at < FORUM_TTL:
+        return _is_forum == 1
+    try:
+        res = await detect_forum(chat_id)
+    except (FloodWait, asyncio.CancelledError):
+        raise
+    except Exception:
+        return None
+    if res is None:
+        return None
+    try:
+        db.set_forum(chat_id, res)
+    except Exception:
+        pass
+    return res
+
+
 async def get_forum_topics(chat_id: int):
     """Темы форума-группы: [{'id': top_msg_id, 'title': ...}].
     Пустой список = не форум или только General. Бросает исключение
@@ -876,6 +933,14 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                 except Exception as e:
                     logger.error(f"Ошибка доп. текста {chat.get('id')}: {e}")
                     chat['text'] = ''
+
+                # Флаг форума освежаем по TTL (не ломаем отправку при ошибке)
+                try:
+                    await refresh_forum_flag(chat['id'], db)
+                except (FloodWait, asyncio.CancelledError):
+                    raise
+                except Exception:
+                    pass
 
                 try:
                     channel_post = db.get_channel_post(chat['id'])

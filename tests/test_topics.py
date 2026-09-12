@@ -23,10 +23,24 @@ def test_migration_topic_slowmode_columns():
     db = memdb()
     try:
         cols = [r[1] for r in db.c.execute('PRAGMA table_info(CHANNELS)').fetchall()]
-        for c in ('SLOWMODE', 'SLOWMODE_AT', 'TOPIC_ID', 'TOPIC_NAME'):
+        for c in ('SLOWMODE', 'SLOWMODE_AT', 'TOPIC_ID', 'TOPIC_NAME', 'SYNC_SLOW',
+                  'IS_FORUM', 'FORUM_AT'):
             assert c in cols
         scols = [r[1] for r in db.c.execute('PRAGMA table_info(SETTINGS)').fetchall()]
         assert 'SYNC_SLOWMODE' in scols
+    finally:
+        db.c.close()
+        db.conn.close()
+
+
+def test_forum_flag_default_and_roundtrip():
+    db = memdb()
+    try:
+        db.add_channel(-1)
+        assert db.get_forum(-1) == (1, 0.0)  # дефолт: показываем выбор
+        assert db.set_forum(-1, False) is True
+        flag, at = db.get_forum(-1)
+        assert flag == 0 and at > 0
     finally:
         db.c.close()
         db.conn.close()
@@ -166,6 +180,109 @@ def test_forward_to_topic_invokes_raw(monkeypatch):
     run(user._forward_to_topic(-10, -1001, [55], 11))
     assert calls[0].top_msg_id == 11
     assert list(calls[0].id) == [55]
+    assert len(calls[0].random_id) == 1
+
+
+def test_detect_forum_matrix(monkeypatch):
+    from pyrogram import raw as _raw
+
+    class PeerChannel:
+        pass
+
+    # подменяем isinstance-проверку через настоящий класс
+    RealInputPeerChannel = _raw.types.InputPeerChannel
+
+    class C:
+        def __init__(self, peer, chats=None, fail=None):
+            self.peer = peer
+            self.chats = chats
+            self.fail = fail
+
+        async def resolve_peer(self, cid):
+            if isinstance(self.fail, Exception) and getattr(self, '_stage', '') == 'resolve':
+                raise self.fail
+            return self.peer
+
+        async def invoke(self, req):
+            if isinstance(self.fail, Exception):
+                raise self.fail
+            from types import SimpleNamespace as NS
+            return NS(chats=self.chats)
+
+    async def no_conn():
+        return False
+
+    monkeypatch.setattr(user, 'ensure_connected', no_conn)
+    assert run(user.detect_forum(-1)) is None  # нет соединения
+
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(user, 'ensure_connected', AsyncMock(return_value=True))
+
+    # обычная группа (не канал) — сразу False без запросов
+    from types import SimpleNamespace as NS
+    basic = NS()
+    monkeypatch.setattr(user, 'client', C(basic))
+    # подменяем isinstance: проще подсунуть настоящий InputPeerChannel только для True-ветки
+    assert run(user.detect_forum(-1)) is False
+
+    # супергруппа-форум
+    class FakePeer(RealInputPeerChannel):
+        def __init__(self):
+            pass  # без инициализации базового
+
+    monkeypatch.setattr(user, 'client', C(FakePeer(), chats=[NS(forum=True)]))
+    assert run(user.detect_forum(-1)) is True
+    monkeypatch.setattr(user, 'client', C(FakePeer(), chats=[NS(forum=False)]))
+    assert run(user.detect_forum(-1)) is False
+    # пусто — неизвестно
+    monkeypatch.setattr(user, 'client', C(FakePeer(), chats=[]))
+    assert run(user.detect_forum(-1)) is None
+
+
+def test_refresh_forum_flag_writes_only_answers(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    class DB:
+        def __init__(self):
+            self.writes = []
+            self.flag = (1, 0.0)
+
+        def get_forum(self, cid):
+            return self.flag
+
+        def set_forum(self, cid, v):
+            self.writes.append((cid, v))
+            return True
+
+    db = DB()
+    monkeypatch.setattr(user, 'detect_forum', AsyncMock(return_value=True))
+    assert run(user.refresh_forum_flag(-1, db, force=True)) is True
+    assert db.writes == [(-1, True)]
+    monkeypatch.setattr(user, 'detect_forum', AsyncMock(return_value=None))
+    assert run(user.refresh_forum_flag(-1, db, force=True)) is None
+    assert db.writes == [(-1, True)]  # 'не знаю' не пишем
+
+
+def test_topic_button_hidden_without_forum():
+    db = memdb()
+    old = main.db
+    main.db = db
+    try:
+        db.add_channel(-1)
+        kb = main.get_chat_settings_keyboard(-1)
+        cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
+        assert any(c.startswith('TOPIC:') for c in cbs)  # дефолт: показываем
+        db.set_forum(-1, False)
+        kb = main.get_chat_settings_keyboard(-1)
+        cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
+        assert not any(c.startswith('TOPIC:') for c in cbs)  # точно не форум — прячем
+        assert 'Тема' not in main.format_chat_info(-1)
+        db.set_forum(-1, True)
+        assert 'Тема' in main.format_chat_info(-1)
+    finally:
+        main.db = old
+        db.c.close()
+        db.conn.close()
 
 
 def test_deliver_topic_passthrough(monkeypatch):

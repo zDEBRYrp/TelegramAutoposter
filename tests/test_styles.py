@@ -8,8 +8,8 @@ from sqliter import DBConnection
 
 
 def test_toggle_style_semantics():
-    assert main._toggle_style(False) == ButtonStyle.SUCCESS  # включает → зелёная
-    assert main._toggle_style(True) == ButtonStyle.DANGER  # выключает → красная
+    assert main._toggle_style(True) == ButtonStyle.SUCCESS  # включено — зелёный
+    assert main._toggle_style(False) is None  # выключено — серый
 
 
 def test_reply_keyboards_colored():
@@ -47,8 +47,8 @@ def test_chat_list_toggle_colors():
             kb, _ = asyncio.run(main.get_chats_keyboard(0, 'all'))
         toggles = {b.callback_data: b for row in kb.inline_keyboard[1:]
                    for b in row if b.callback_data.startswith('TOGGLE_SPAM:')}
-        assert toggles['TOGGLE_SPAM:-1:0:all'].style == ButtonStyle.DANGER
-        assert toggles['TOGGLE_SPAM:-2:0:all'].style == ButtonStyle.SUCCESS
+        assert toggles['TOGGLE_SPAM:-1:0:all'].style == ButtonStyle.SUCCESS
+        assert toggles['TOGGLE_SPAM:-2:0:all'].style is None
         add = [b for row in kb.inline_keyboard for b in row
                if b.callback_data == 'ADD_CHAT'][0]
         assert add.style == ButtonStyle.SUCCESS
