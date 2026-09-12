@@ -559,10 +559,25 @@ def get_chat_settings_keyboard(chat_id):
     except Exception:
         topic_id, topic_name = 0, ''
     topic_label = 'General' if not topic_id else (topic_name or f'#{topic_id}')
+    try:
+        slow, _ = db.get_slowmode(chat_id)
+    except Exception:
+        slow = 0
     rows = [
         [InlineKeyboardButton(text=spam_text, callback_data=f'TOGGLE_SPAM_SETTINGS:{chat_id}')],
         [InlineKeyboardButton(text='📝 Пост чата', callback_data=f'EDIT_CHANNEL_POST:{chat_id}')],
         [InlineKeyboardButton(text=f'🧵 Тема: {_short(topic_label, 20)}', callback_data=f'TOPIC:{chat_id}')],
+    ]
+    if slow:
+        # Кнопка впритык — только где слоумод реально есть
+        try:
+            chat_sync = db.get_sync_slow(chat_id) == 1
+        except Exception:
+            chat_sync = True
+        rows.append([InlineKeyboardButton(
+            text=f'🐢 Впритык к КД ({slow}с): {"✅" if chat_sync else "⬜"}',
+            callback_data=f'TOGGLE_SYNC:{chat_id}')])
+    rows += [
         [InlineKeyboardButton(text=f'⏱ Интервал: {timeout_val} мин.', callback_data=f'CHANGE_TIMEOUT:{chat_id}')],
         [InlineKeyboardButton(text='💬 Доп. текст', callback_data=f'ADD_ADDITIONAL:{chat_id}')],
     ]
@@ -646,23 +661,31 @@ def format_chat_info(chat_id: int) -> str:
         topic_id, topic_name = 0, ''
     topic_desc = 'General' if not topic_id else html.escape(topic_name or f'#{topic_id}')
     try:
-        slow, _ = db.get_slowmode(chat_id)
+        slow, slow_at = db.get_slowmode(chat_id)
     except Exception:
-        slow = 0
+        slow, slow_at = 0, 0.0
     try:
-        sync_on = db.get_sync_slowmode() == 1
+        sync_on = user._chat_sync_on(db, chat_id)
     except Exception:
         sync_on = True
     slow_line = ''
     if slow:
         try:
             eff = user._effective_delay(timeout_val, slow, sync_on)
+            eff_txt = _fmt_delay(eff)
         except Exception:
-            eff = None
-        if sync_on and eff:
-            slow_line = f'\n🐢 Слоумод: {slow}с → шлём каждые ~{_fmt_delay(eff)}'
+            eff_txt = None
+        checked = ''
+        try:
+            if slow_at:
+                checked = f' (проверено {_time.strftime("%H:%M", _time.localtime(slow_at))})'
+        except Exception:
+            pass
+        if sync_on and eff_txt:
+            slow_line = (f'\n🐢 Слоумод: {slow}с{checked} → шлём каждые ~{eff_txt}, '
+                         f'но не чаще минимума {timeout_val} мин.')
         else:
-            slow_line = f'\n🐢 Слоумод: {slow}с (синх выкл)'
+            slow_line = f'\n🐢 Слоумод: {slow}с{checked} (впритык выкл)'
     return (f'💬 <b>Чат {chat_id}</b>\n'
             f'{"✅ Рассылка включена" if spam_status == 1 else "⬜ Рассылка выключена"}\n'
             f'⏱ Интервал: {timeout_val} мин.{slow_line}\n'
@@ -1315,6 +1338,18 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
                                   reply_markup=get_chat_settings_keyboard(chat_id),
                                   parse_mode=ParseMode.HTML)
         await c.answer()
+
+    elif data.startswith('TOGGLE_SYNC:'):
+        chat_id = int(data.split(':')[1])
+        try:
+            cur = db.get_sync_slow(chat_id) == 1
+        except Exception:
+            cur = True
+        db.set_sync_slow(chat_id, 0 if cur else 1)
+        await c.message.edit_text(format_chat_info(chat_id),
+                                  reply_markup=get_chat_settings_keyboard(chat_id),
+                                  parse_mode=ParseMode.HTML)
+        await c.answer('🐢 Впритык выключен' if cur else '🐢 Впритык включён')
 
     elif data.startswith('EDIT_CHAT:'):
         chat_id = int(data.split(':')[1])

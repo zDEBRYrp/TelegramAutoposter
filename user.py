@@ -580,6 +580,26 @@ def _effective_delay(user_minutes, slow_sec: int, sync_on: bool) -> int:
     return base
 
 
+def _chat_sync_on(db, chat_id: int) -> bool:
+    """Синх КД со слоумодом для чата: глобальный тумблер И per-chat флаг.
+    Интервал юзера при этом всегда остаётся минимумом (см. _effective_delay)."""
+    glob = True
+    try:
+        get_g = getattr(db, 'get_sync_slowmode', None)
+        if get_g is not None:
+            glob = get_g() == 1
+    except Exception:
+        pass
+    per = True
+    try:
+        get_p = getattr(db, 'get_sync_slow', None)
+        if get_p is not None:
+            per = int(get_p(chat_id) or 0) == 1
+    except Exception:
+        pass
+    return bool(glob and per)
+
+
 async def get_channel_slowmode(chat_id: int, db) -> int:
     """Слоумод канала в секундах (0 = нет). Кэшируем в БД на SLOWMODE_TTL.
     Определяем через GetFullChannel — код сам видит КД канала."""
@@ -849,10 +869,7 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                     except (TypeError, ValueError):
                         topic_id = 0
                     slow = await get_channel_slowmode(chat['id'], db)
-                    try:
-                        sync_on = db.get_sync_slowmode() == 1
-                    except Exception:
-                        sync_on = True
+                    sync_on = _chat_sync_on(db, chat['id'])
                     delay = _effective_delay(timeout, slow, sync_on)
 
                     try:

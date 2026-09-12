@@ -256,6 +256,7 @@ class DBConnection(object):
             self._ensure_column('CHANNELS', 'TOPIC_ID', 'INTEGER DEFAULT 0')
             self._ensure_column('CHANNELS', 'TOPIC_NAME', "TEXT DEFAULT ''")
             self._ensure_column('SETTINGS', 'SYNC_SLOWMODE', 'INTEGER DEFAULT 1')
+            self._ensure_column('CHANNELS', 'SYNC_SLOW', 'INTEGER DEFAULT 1')
             
             self.c.execute('SELECT * FROM SETTINGS WHERE ID = 1')
             if self.c.fetchone() is None:
@@ -578,6 +579,26 @@ class DBConnection(object):
             return True
         except Exception as e:
             logger.error(f"Ошибка установки темы: {e}")
+            return False
+
+    def get_sync_slow(self, channel_id: int) -> int:
+        """Участвует ли чат в привязке к слоумоду (1/0, по умолчанию 1)."""
+        try:
+            self.c.execute('SELECT SYNC_SLOW FROM CHANNELS WHERE CHANNEL = ?', [str(channel_id)])
+            row = self.c.fetchone()
+            return 1 if not row or row[0] is None else int(row[0])
+        except Exception as e:
+            logger.error(f"Ошибка чтения SYNC_SLOW: {e}")
+            return 1
+
+    def set_sync_slow(self, channel_id: int, enabled: int) -> bool:
+        try:
+            self.c.execute('UPDATE CHANNELS SET SYNC_SLOW = ? WHERE CHANNEL = ?',
+                           [1 if enabled else 0, str(channel_id)])
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка переключения SYNC_SLOW: {e}")
             return False
     
     def stop_spam_for_channel(self, channel_id: int) -> bool:

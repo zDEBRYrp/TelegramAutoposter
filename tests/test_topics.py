@@ -204,6 +204,7 @@ def test_topic_button_and_handlers():
     import inspect
     src = inspect.getsource(main.callback_handler)
     assert 'TOPIC_SET:' in src and 'TOPIC_MANUAL:' in src and 'SET_TOGGLE_SYNC' in src
+    assert 'TOGGLE_SYNC:' in src
     names = [h.callback.__name__ for h in main.router.message.handlers]
     assert 'input_topic_id' in names
     kb = main.get_chat_settings_keyboard(-1)
@@ -212,3 +213,89 @@ def test_topic_button_and_handlers():
     text, card = main.build_settings_card()
     cbs2 = [b.callback_data for row in card.inline_keyboard for b in row]
     assert 'SET_TOGGLE_SYNC' in cbs2
+
+
+def test_sync_slow_roundtrip():
+    from sqliter import DBConnection
+    db = DBConnection(db_path=':memory:')
+    try:
+        db.add_channel(-1)
+        assert db.get_sync_slow(-1) == 1  # по умолчанию участвуем
+        assert db.set_sync_slow(-1, 0) is True
+        assert db.get_sync_slow(-1) == 0
+    finally:
+        db.c.close()
+        db.conn.close()
+
+
+def test_migration_sync_slow_column():
+    from sqliter import DBConnection
+    db = DBConnection(db_path=':memory:')
+    try:
+        cols = [r[1] for r in db.c.execute('PRAGMA table_info(CHANNELS)').fetchall()]
+        assert 'SYNC_SLOW' in cols
+    finally:
+        db.c.close()
+        db.conn.close()
+
+
+def test_chat_sync_on_matrix():
+    import user as _u
+
+    class FullDB:
+        def __init__(self, g, p):
+            self.g, self.p = g, p
+
+        def get_sync_slowmode(self):
+            return self.g
+
+        def get_sync_slow(self, cid):
+            return self.p
+
+    assert _u._chat_sync_on(FullDB(1, 1), -1) is True
+    assert _u._chat_sync_on(FullDB(1, 0), -1) is False
+    assert _u._chat_sync_on(FullDB(0, 1), -1) is False
+    assert _u._chat_sync_on(object(), -1) is True  # без методов — вкл
+
+
+def test_floor_holds_when_slowmode_drops():
+    import user as _u
+    # слоумод упал 30мин -> 2с, минимум юзера 30мин — не спамим
+    assert _u._effective_delay(30, 1800, True) == 1800
+    assert _u._effective_delay(30, 2, True) == 1800
+
+
+def test_sync_button_only_with_slowmode():
+    from sqliter import DBConnection
+    db = DBConnection(db_path=':memory:')
+    old = main.db
+    main.db = db
+    try:
+        db.add_channel(-1)
+        kb = main.get_chat_settings_keyboard(-1)
+        cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
+        assert not any(c.startswith('TOGGLE_SYNC:') for c in cbs)  # слоумода нет — кнопки нет
+        db.set_slowmode(-1, 30)
+        kb = main.get_chat_settings_keyboard(-1)
+        cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
+        assert 'TOGGLE_SYNC:-1' in cbs  # слоумод есть — кнопка есть
+        info = main.format_chat_info(-1)
+        assert 'Слоумод' in info and 'минимум' in info
+    finally:
+        main.db = old
+        db.c.close()
+        db.conn.close()
+
+
+def test_card_no_slowmode_no_line():
+    from sqliter import DBConnection
+    db = DBConnection(db_path=':memory:')
+    old = main.db
+    main.db = db
+    try:
+        db.add_channel(-2)
+        assert 'Слоумод' not in main.format_chat_info(-2)
+    finally:
+        main.db = old
+        db.c.close()
+        db.conn.close()
