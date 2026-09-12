@@ -115,10 +115,9 @@ def test_log_send_media_caption_plus_quote(monkeypatch, tmp_path):
     monkeypatch.setattr(user, 'client', stub)
     run(user._log_send(StubDB(), {'id': -1, 'title': 'C'}, 'hi',
                        photo_path=str(pic)))
-    assert len(stub.sent) == 2
-    assert '#log' in stub.sent[0][2]  # подпись медиа
-    assert '<blockquote>' not in (stub.sent[0][2] or '')
-    assert '<blockquote>hi</blockquote>' in stub.sent[1][1]
+    assert len(stub.sent) == 1  # влезло в подпись — одним сообщением
+    assert '#log' in stub.sent[0][2]
+    assert '<blockquote>hi</blockquote>' in stub.sent[0][2]
 
 
 def test_log_send_media_no_text_single(monkeypatch, tmp_path):

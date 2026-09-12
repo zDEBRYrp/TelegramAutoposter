@@ -572,6 +572,34 @@ async def _log_send(db, chat: Dict[str, Any], text: str,
     if not media_path and video_path:
         media_path = _resolve_media(video_path)
         is_video = bool(media_path)
+
+    async def _safe_send_media(caption_html: str):
+        try:
+            if is_video:
+                await client.send_video(dest, media_path, caption=caption_html,
+                                        parse_mode=PyroParseMode.HTML)
+            else:
+                await client.send_photo(dest, media_path, caption=caption_html,
+                                        parse_mode=PyroParseMode.HTML)
+        except (FloodWait, asyncio.CancelledError):
+            raise
+        except Exception as e:
+            if _is_parse_error(e):
+                plain_cap = strip_html_tags(caption_html) or None
+                try:
+                    if is_video:
+                        await client.send_video(dest, media_path, caption=plain_cap)
+                    else:
+                        await client.send_photo(dest, media_path, caption=plain_cap)
+                except (FloodWait, asyncio.CancelledError):
+                    raise
+                except Exception as e2:
+                    logger.warning(f"Лог-медиа не ушло в {dest}: {e2}")
+                    raise RuntimeError(str(e2))
+            else:
+                logger.warning(f"Лог-медиа не ушло в {dest}: {e}")
+                raise RuntimeError(str(e))
+
     try:
         if fwd is not None:
             await _safe_send_text(header)
@@ -586,33 +614,14 @@ async def _log_send(db, chat: Dict[str, Any], text: str,
             if body:
                 await _safe_send_text(f'<blockquote>{body}</blockquote>')
         elif media_path:
-            try:
-                if is_video:
-                    await client.send_video(dest, media_path, caption=header,
-                                            parse_mode=PyroParseMode.HTML)
-                else:
-                    await client.send_photo(dest, media_path, caption=header,
-                                            parse_mode=PyroParseMode.HTML)
-            except (FloodWait, asyncio.CancelledError):
-                raise
-            except Exception as e:
-                if _is_parse_error(e):
-                    plain_cap = strip_html_tags(header) or None
-                    try:
-                        if is_video:
-                            await client.send_video(dest, media_path, caption=plain_cap)
-                        else:
-                            await client.send_photo(dest, media_path, caption=plain_cap)
-                    except (FloodWait, asyncio.CancelledError):
-                        raise
-                    except Exception as e2:
-                        logger.warning(f"Лог-медиа не ушло в {dest}: {e2}")
-                        return
-                else:
-                    logger.warning(f"Лог-медиа не ушло в {dest}: {e}")
-                    return
-            if body:
-                await _safe_send_text(f'<blockquote>{body}</blockquote>')
+            quote = f'<blockquote>{body}</blockquote>' if body else ''
+            if quote and len(header) + 1 + len(quote) <= 1000:
+                # Короткий пост — одним сообщением с подписью
+                await _safe_send_media(f'{header}\n{quote}')
+            else:
+                await _safe_send_media(header)
+                if quote:
+                    await _safe_send_text(quote)
         elif body:
             await _safe_send_text(f'{header}\n<blockquote>{body}</blockquote>')
         else:
