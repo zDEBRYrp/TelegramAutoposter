@@ -288,19 +288,20 @@ def _to_html(text: str) -> str:
 
 
 async def _send_with_fallback(chat_id: int, text: str, photo_path: str = None,
-                              video_path: str = None, topic: int = 0):
+                              video_path: str = None, topic: int = 0, mention: str = ''):
     """Отправить медиа с fallback на текст если чат не поддерживает.
-    topic = id темы форума (0 = General): шлём ответом в топик."""
+    topic = id темы форума (0 = General): шлём ответом в топик.
+    mention = готовый HTML-хвост со скрытыми отметками (уже после конвертации)."""
     from pyrogram.enums import ParseMode as PyroParseMode
 
-    html_text = _to_html(text) if text else None
+    html_text = ((_to_html(text) if text else '') + (mention or ''))
     reply_to = int(topic) if topic else None
 
     if photo_path:
         found = _resolve_media(photo_path) or (photo_path if os.path.exists(photo_path) else None)
         if found:
             try:
-                await client.send_photo(chat_id, found, caption=html_text,
+                await client.send_photo(chat_id, found, caption=html_text or None,
                                         parse_mode=PyroParseMode.HTML,
                                         reply_to_message_id=reply_to)
                 return
@@ -322,7 +323,7 @@ async def _send_with_fallback(chat_id: int, text: str, photo_path: str = None,
         found = _resolve_media(video_path) or (video_path if os.path.exists(video_path) else None)
         if found:
             try:
-                await client.send_video(chat_id, found, caption=html_text,
+                await client.send_video(chat_id, found, caption=html_text or None,
                                         parse_mode=PyroParseMode.HTML,
                                         reply_to_message_id=reply_to)
                 return
@@ -373,6 +374,62 @@ def strip_html_tags(s: str) -> str:
     return _html.unescape(s)
 
 
+# Кэш участников для скрытых отметок: chat_id -> (at, [user_id])
+_tag_cache: dict = {}
+TAG_LIMIT = 50  # максимум скрытых отметок на пост (лимит сущностей)
+TAG_MEMBERS_TTL = 3600  # кэш списка участников (сек)
+TAG_ANCHOR = chr(0x2060)  # U+2060 WORD JOINER — невидимый якорь для отметок
+SLOWMODE_TTL = 3600  # как часто перепроверяем слоумод канала (сек)
+
+
+async def get_tag_members(chat_id: int, limit: int = TAG_LIMIT):
+    """ID участников чата для скрытых отметок (боты и удалённые — мимо).
+    Кэшируется на TAG_MEMBERS_TTL."""
+    now = _time.time()
+    entry = _tag_cache.get(chat_id)
+    if entry and now - entry[0] < TAG_MEMBERS_TTL:
+        return list(entry[1])
+    if not await ensure_connected():
+        return list(entry[1]) if entry else []
+    ids = []
+    try:
+        async for m in client.get_chat_members(chat_id, limit=limit * 2):
+            try:
+                u = m.user
+                if getattr(u, 'is_bot', False) or getattr(u, 'is_deleted', False):
+                    continue
+                ids.append(int(u.id))
+            except Exception:
+                continue
+            if len(ids) >= limit:
+                break
+    except Exception as e:
+        logger.error(f"Не смог прочитать участников {chat_id}: {e}")
+        return list(entry[1]) if entry else []
+    _tag_cache[chat_id] = (now, ids)
+    return list(ids)
+
+
+async def build_mentions(chat_id: int, db) -> str:
+    """HTML-хвост со скрытыми отметками ('' если выключено/некого отмечать).
+    Якоря — невидимые U+2060, сущности — text_mention через tg://user ссылки."""
+    try:
+        get_tag = getattr(db, 'get_tag_all', None)
+        if get_tag is None or get_tag(chat_id) != 1:
+            return ''
+    except Exception:
+        return ''
+    ids = await get_tag_members(chat_id)
+    if not ids:
+        return ''
+    # Прогреваем пиров, иначе парсер выкинет неизвестных молча
+    try:
+        await client.get_users(ids)
+    except Exception as e:
+        logger.error(f"Прогрев пиров для отметок {chat_id}: {e}")
+    return ''.join(f'<a href="tg://user?id={i}">{TAG_ANCHOR}</a>' for i in ids)
+
+
 def register_send_result(db, chat_id: int, ok: bool, err: str) -> bool:
     """Пишем итог в send_status. Фатальные ошибки выключают чат.
     Возвращает True если чат выключен."""
@@ -389,12 +446,14 @@ def register_send_result(db, chat_id: int, ok: bool, err: str) -> bool:
 
 
 async def _deliver(chat_id: int, text: str,
-                   photo_path: str = None, video_path: str = None, fwd=None, topic: int = 0):
+                   photo_path: str = None, video_path: str = None, fwd=None, topic: int = 0,
+                   mention: str = ''):
     """Отправка без исключений наружу (кроме FloodWait/Cancelled).
     Возвращает (ok, error). При битой HTML-разметке — повтор plain-текстом.
     fwd = (from_chat_id, message_id): переслать как есть (премиум-эмодзи целы),
-    текст следом отдельным сообщением. topic = тема форума (0 = General)."""
-    if not text and not photo_path and not video_path and not fwd:
+    текст следом отдельным сообщением. topic = тема форума (0 = General).
+    mention = готовый HTML-хвост скрытых отметок (уже после конвертации)."""
+    if not text and not photo_path and not video_path and not fwd and not mention:
         return True, ''
     if fwd is not None:
         try:
@@ -407,12 +466,12 @@ async def _deliver(chat_id: int, text: str,
             raise
         except Exception as e:
             return False, str(e)
-        if not text:
+        if not text and not mention:
             return True, ''
         photo_path = video_path = None
     try:
         await _send_with_fallback(chat_id, text, photo_path=photo_path, video_path=video_path,
-                                  topic=topic)
+                                  topic=topic, mention=mention)
         return True, ''
     except (FloodWait, asyncio.CancelledError):
         raise
@@ -420,7 +479,7 @@ async def _deliver(chat_id: int, text: str,
         if _is_parse_error(e):
             logger.warning(f"HTML не парсится для {chat_id} ({e}), шлю plain-текстом")
             try:
-                plain = strip_html_tags(text)
+                plain = strip_html_tags(text) + strip_html_tags(mention)
                 if photo_path:
                     await _send_with_fallback(chat_id, plain, photo_path=photo_path, topic=topic)
                 elif video_path:
@@ -440,12 +499,12 @@ SEND_STAGGER_SEC = 5  # пауза между отправками в РАЗНЫ
 POLL_STEP_SEC = 15  # гранулярность проверки флага/расписания
 SEND_ATTEMPTS = 3  # попыток отправки в чат подряд
 RETRY_DELAY_SEC = 10  # пауза между попытками в один чат
-SLOWMODE_TTL = 3600  # как часто перепроверяем слоумод канала (сек)
 
 
 async def _send_with_retries(chat_id: int, text: str,
                              photo_path: str = None, video_path: str = None,
-                             fwd=None, topic: int = 0, attempts: int = SEND_ATTEMPTS):
+                             fwd=None, topic: int = 0, mention: str = '',
+                             attempts: int = SEND_ATTEMPTS):
     """Пробуем отправить несколько раз подряд (FloodWait/отмена — наружу).
     Фатальные ошибки не ретраим (бессмысленно). Возвращает (ok, err, tries)."""
     last_err = ''
@@ -453,7 +512,7 @@ async def _send_with_retries(chat_id: int, text: str,
     for n in range(max(1, attempts)):
         tries += 1
         try:
-            ok, err = await _deliver(chat_id, text, photo_path, video_path, fwd, topic)
+            ok, err = await _deliver(chat_id, text, photo_path, video_path, fwd, topic, mention)
         except (FloodWait, asyncio.CancelledError):
             raise
         if ok:
@@ -873,8 +932,15 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                     delay = _effective_delay(timeout, slow, sync_on)
 
                     try:
+                        mention = await build_mentions(chat['id'], db)
+                    except Exception as e:
+                        logger.error(f"Отметки для {chat['id']}: {e}")
+                        mention = ''
+
+                    try:
                         ok, err, tries = await _send_with_retries(
-                            chat['id'], text, photo_path, video_path, fwd=fwd, topic=topic_id)
+                            chat['id'], text, photo_path, video_path,
+                            fwd=fwd, topic=topic_id, mention=mention)
                     except FloodWait as e:
                         wait = int(getattr(e, 'value', 30) or 30)
                         logger.warning(f"FloodWait {wait}s для {chat['id']}, повтор позже")

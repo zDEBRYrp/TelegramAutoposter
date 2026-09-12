@@ -257,6 +257,7 @@ class DBConnection(object):
             self._ensure_column('CHANNELS', 'TOPIC_NAME', "TEXT DEFAULT ''")
             self._ensure_column('SETTINGS', 'SYNC_SLOWMODE', 'INTEGER DEFAULT 1')
             self._ensure_column('CHANNELS', 'SYNC_SLOW', 'INTEGER DEFAULT 1')
+            self._ensure_column('CHANNELS', 'TAG_ALL', 'INTEGER DEFAULT 0')
             
             self.c.execute('SELECT * FROM SETTINGS WHERE ID = 1')
             if self.c.fetchone() is None:
@@ -599,6 +600,26 @@ class DBConnection(object):
             return True
         except Exception as e:
             logger.error(f"Ошибка переключения SYNC_SLOW: {e}")
+            return False
+
+    def get_tag_all(self, channel_id: int) -> int:
+        """Скрытые отметки всех при отправке (1/0, по умолчанию 0)."""
+        try:
+            self.c.execute('SELECT TAG_ALL FROM CHANNELS WHERE CHANNEL = ?', [str(channel_id)])
+            row = self.c.fetchone()
+            return 1 if row and row[0] else 0
+        except Exception as e:
+            logger.error(f"Ошибка чтения TAG_ALL: {e}")
+            return 0
+
+    def set_tag_all(self, channel_id: int, enabled: int) -> bool:
+        try:
+            self.c.execute('UPDATE CHANNELS SET TAG_ALL = ? WHERE CHANNEL = ?',
+                           [1 if enabled else 0, str(channel_id)])
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка переключения TAG_ALL: {e}")
             return False
     
     def stop_spam_for_channel(self, channel_id: int) -> bool:

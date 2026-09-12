@@ -171,7 +171,7 @@ def test_forward_to_topic_invokes_raw(monkeypatch):
 def test_deliver_topic_passthrough(monkeypatch):
     got = {}
 
-    async def fake_send(chat_id, text, photo_path=None, video_path=None, topic=0):
+    async def fake_send(chat_id, text, photo_path=None, video_path=None, topic=0, mention=''):
         got['topic'] = topic
         return True, ''
 

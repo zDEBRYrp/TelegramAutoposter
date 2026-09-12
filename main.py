@@ -579,11 +579,18 @@ def get_chat_settings_keyboard(chat_id):
         slow, _ = db.get_slowmode(chat_id)
     except Exception:
         slow = 0
+    try:
+        tag_on = db.get_tag_all(chat_id) == 1
+    except Exception:
+        tag_on = False
     rows = [
         [InlineKeyboardButton(text=spam_text, callback_data=f'TOGGLE_SPAM_SETTINGS:{chat_id}',
                               style=_toggle_style(spam_status == 1))],
         [InlineKeyboardButton(text='📝 Пост чата', callback_data=f'EDIT_CHANNEL_POST:{chat_id}')],
         [InlineKeyboardButton(text=f'🧵 Тема: {_short(topic_label, 20)}', callback_data=f'TOPIC:{chat_id}')],
+        [InlineKeyboardButton(text=f'👥 Отмечать всех: {"✅" if tag_on else "⬜"}',
+                              callback_data=f'TOGGLE_TAG:{chat_id}',
+                              style=_toggle_style(tag_on))],
     ]
     if slow:
         # Кнопка впритык — только где слоумод реально есть
@@ -680,6 +687,10 @@ def format_chat_info(chat_id: int) -> str:
         topic_id, topic_name = 0, ''
     topic_desc = 'General' if not topic_id else html.escape(topic_name or f'#{topic_id}')
     try:
+        tag_on = db.get_tag_all(chat_id) == 1
+    except Exception:
+        tag_on = False
+    try:
         slow, slow_at = db.get_slowmode(chat_id)
     except Exception:
         slow, slow_at = 0, 0.0
@@ -709,6 +720,7 @@ def format_chat_info(chat_id: int) -> str:
             f'{"✅ Рассылка включена" if spam_status == 1 else "⬜ Рассылка выключена"}\n'
             f'⏱ Интервал: {timeout_val} мин.{slow_line}\n'
             f'🧵 Тема: {topic_desc}\n'
+            f'👥 Отметки: {"✅ всех" if tag_on else "⬜ выкл"}\n'
             f'{_next_send_line(chat_id)}\n'
             f'💬 Доп. текст: {addit_val}\n'
             f'📝 Пост: {post_desc}\n'
@@ -1375,6 +1387,18 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
                                   reply_markup=get_chat_settings_keyboard(chat_id),
                                   parse_mode=ParseMode.HTML)
         await c.answer('🐢 Впритык выключен' if cur else '🐢 Впритык включён')
+
+    elif data.startswith('TOGGLE_TAG:'):
+        chat_id = int(data.split(':')[1])
+        try:
+            cur = db.get_tag_all(chat_id) == 1
+        except Exception:
+            cur = False
+        db.set_tag_all(chat_id, 0 if cur else 1)
+        await c.message.edit_text(format_chat_info(chat_id),
+                                  reply_markup=get_chat_settings_keyboard(chat_id),
+                                  parse_mode=ParseMode.HTML)
+        await c.answer('👥 Отметки выключены' if cur else '👥 Будем отмечать всех (скрыто)')
 
     elif data.startswith('EDIT_CHAT:'):
         chat_id = int(data.split(':')[1])
