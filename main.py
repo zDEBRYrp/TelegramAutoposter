@@ -403,6 +403,33 @@ def back_to_global_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text='⬅️ К посту', callback_data='BACK_TO_GLOBAL')]])
 
 
+def cancel_kb() -> InlineKeyboardMarkup:
+    """Кнопка отмены под любым вводом."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='❌ Отмена', callback_data='CANCEL_INPUT',
+                              style=ButtonStyle.DANGER)]])
+
+
+async def _complete_input(m: Message, state: FSMContext, text: str,
+                          kb: InlineKeyboardMarkup | None = None):
+    """Успешный ввод: удаляем запрос и сообщение юзера, шлём свежий итог."""
+    try:
+        prompt = await _prompt_id(state)
+    except Exception:
+        prompt = None
+    await _clean_trigger(m)
+    if prompt:
+        try:
+            await bot.delete_message(m.chat.id, prompt)
+        except Exception:
+            pass
+    try:
+        await state.clear()
+    except Exception:
+        pass
+    await bot.send_message(m.chat.id, text, reply_markup=kb, parse_mode=ParseMode.HTML)
+
+
 def back_to_settings_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text='⬅️ К настройкам', callback_data='SETTINGS_BACK')]])
@@ -493,9 +520,9 @@ def spam_running_keyboard():
     ], resize_keyboard=True)
 
 
-def _toggle_style(currently_on: bool):
-    """Цвет кнопки-тоггла по действию: включает → зелёная, выключает → красная."""
-    return ButtonStyle.SUCCESS if not currently_on else ButtonStyle.DANGER
+def _toggle_style(is_on: bool):
+    """Цвет тумблера по СОСТОЯНИЮ: включено — зелёный, выключено — серый."""
+    return ButtonStyle.SUCCESS if is_on else None
 
 
 def _page_indicator(text: str) -> InlineKeyboardButton:
@@ -576,6 +603,10 @@ def get_chat_settings_keyboard(chat_id):
         topic_id, topic_name = 0, ''
     topic_label = 'General' if not topic_id else (topic_name or f'#{topic_id}')
     try:
+        is_forum, _ = db.get_forum(chat_id)
+    except Exception:
+        is_forum = 1
+    try:
         slow, _ = db.get_slowmode(chat_id)
     except Exception:
         slow = 0
@@ -587,11 +618,14 @@ def get_chat_settings_keyboard(chat_id):
         [InlineKeyboardButton(text=spam_text, callback_data=f'TOGGLE_SPAM_SETTINGS:{chat_id}',
                               style=_toggle_style(spam_status == 1))],
         [InlineKeyboardButton(text='📝 Пост чата', callback_data=f'EDIT_CHANNEL_POST:{chat_id}')],
-        [InlineKeyboardButton(text=f'🧵 Тема: {_short(topic_label, 20)}', callback_data=f'TOPIC:{chat_id}')],
-        [InlineKeyboardButton(text=f'👥 Отмечать всех: {"✅" if tag_on else "⬜"}',
-                              callback_data=f'TOGGLE_TAG:{chat_id}',
-                              style=_toggle_style(tag_on))],
     ]
+    if is_forum:
+        # Темы — только где есть ветки
+        rows.append([InlineKeyboardButton(text=f'🧵 Тема: {_short(topic_label, 20)}',
+                                          callback_data=f'TOPIC:{chat_id}')])
+    rows.append([InlineKeyboardButton(text=f'👥 Отмечать всех: {"✅" if tag_on else "⬜"}',
+                                      callback_data=f'TOGGLE_TAG:{chat_id}',
+                                      style=_toggle_style(tag_on))])
     if slow:
         # Кнопка впритык — только где слоумод реально есть
         try:
@@ -685,6 +719,10 @@ def format_chat_info(chat_id: int) -> str:
         topic_id, topic_name = db.get_topic(chat_id)
     except Exception:
         topic_id, topic_name = 0, ''
+    try:
+        is_forum, _ = db.get_forum(chat_id)
+    except Exception:
+        is_forum = 1
     topic_desc = 'General' if not topic_id else html.escape(topic_name or f'#{topic_id}')
     try:
         tag_on = db.get_tag_all(chat_id) == 1
@@ -719,7 +757,7 @@ def format_chat_info(chat_id: int) -> str:
     return (f'💬 <b>Чат {chat_id}</b>\n'
             f'{"✅ Рассылка включена" if spam_status == 1 else "⬜ Рассылка выключена"}\n'
             f'⏱ Интервал: {timeout_val} мин.{slow_line}\n'
-            f'🧵 Тема: {topic_desc}\n'
+            + (f'🧵 Тема: {topic_desc}\n' if is_forum else '') +
             f'👥 Отметки: {"✅ всех" if tag_on else "⬜ выкл"}\n'
             f'{_next_send_line(chat_id)}\n'
             f'💬 Доп. текст: {addit_val}\n'
@@ -730,6 +768,14 @@ def format_chat_info(chat_id: int) -> str:
 CHAT_FILTERS = ('all', 'on', 'off')
 FILTER_NAMES = {'all': 'все', 'on': 'включённые', 'off': 'выключенные'}
 
+# Мультивыбор чатов (в памяти, на админа): режим + выбранные id
+multi_mode: set[int] = set()
+multi_sel: dict[int, set[int]] = {}
+
+
+def _admin_key(c: CallbackQuery) -> int:
+    return c.from_user.id if c.from_user else 0
+
 
 def chats_header(total: int, active: int, filt: str) -> str:
     return (f'💬 <b>Чаты</b> — {FILTER_NAMES.get(filt, "все")} '
@@ -737,15 +783,21 @@ def chats_header(total: int, active: int, filt: str) -> str:
             f'Нажми на чат чтобы вкл/выкл, ⚙️ — настройки')
 
 
-async def get_chats_keyboard(page=0, filt='all'):
+def multi_header(n: int) -> str:
+    return (f'☑️ <b>Выбор чатов</b> — выбрано: {n}\n'
+            f'Тапай по чатам чтобы отметить, потом выбери действие ниже.')
+
+
+async def get_chats_keyboard(page=0, filt='all', select_mode=False, selected=frozenset()):
     if filt not in CHAT_FILTERS:
         filt = 'all'
     chats = await user.get_chats()
     per_page = 10
 
-    # Статусы одним запросом + дозапись новых чатов пачкой (было N+1 запросов)
-    rows = db.c.execute('SELECT CHANNEL, SPAM_ENABLED FROM CHANNELS').fetchall()
+    # Статусы + свежесть одним запросом, дозапись новых чатов пачкой
+    rows = db.c.execute('SELECT CHANNEL, SPAM_ENABLED, SORT_TS FROM CHANNELS').fetchall()
     statuses = {str(r[0]): (r[1] or 0) for r in rows}
+    sort_ts = {str(r[0]): (r[2] or 0) for r in rows}
     missing = [str(ch['id']) for ch in chats if str(ch['id']) not in statuses]
     if missing:
         db.c.executemany(
@@ -755,18 +807,22 @@ async def get_chats_keyboard(page=0, filt='all'):
         db.conn.commit()
         for cid in missing:
             statuses[cid] = 0
+            sort_ts[cid] = 0
 
     total = len(chats)
     active = sum(1 for ch in chats if statuses.get(str(ch['id']), 0) == 1)
 
-    # Фильтр + сортировка: включённые всегда наверху
+    # Фильтр + стабильный порядок: включённые сверху, внутри — кто недавно
+    # переключался выше (и вкл, и выкл), дальше по названию
     if filt == 'on':
         chats = [ch for ch in chats if statuses.get(str(ch['id']), 0) == 1]
     elif filt == 'off':
         chats = [ch for ch in chats if statuses.get(str(ch['id']), 0) != 1]
 
     def sort_key(chat):
-        return 0 if statuses.get(str(chat['id']), 0) == 1 else 1
+        cid = str(chat['id'])
+        on = statuses.get(cid, 0) == 1
+        return (0 if on else 1, -(sort_ts.get(cid, 0) or 0), str(chat.get('title') or '').lower())
 
     chats.sort(key=sort_key)
 
@@ -777,6 +833,43 @@ async def get_chats_keyboard(page=0, filt='all'):
     page_chats = chats[start:end]
 
     keyboard = []
+    if select_mode:
+        keyboard.append([InlineKeyboardButton(text=f'☑️ Выбрано: {len(selected)}',
+                                              callback_data='PAGINATION')])
+        for chat in page_chats:
+            cid = int(chat['id'])
+            mark = '☑️' if cid in selected else '◻️'
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=f'{mark} {chat["title"]}',
+                    callback_data=f'SELECT_CHAT:{cid}:{page}:{filt}'
+                ),
+                InlineKeyboardButton(text='⚙️', callback_data=f'EDIT_CHAT:{cid}')
+            ])
+        if len(chats) > per_page:
+            nav = []
+            if page > 0:
+                nav.append(InlineKeyboardButton(text='⬅️', callback_data=f'SELECT_PAGE:{page-1}:{filt}'))
+            nav.append(_page_indicator(f'{page+1}/{total_pages}'))
+            if page < total_pages - 1:
+                nav.append(InlineKeyboardButton(text='➡️', callback_data=f'SELECT_PAGE:{page+1}:{filt}'))
+            keyboard.append(nav)
+        if selected:
+            keyboard.append([
+                InlineKeyboardButton(text=f'✅ Вкл ({len(selected)})', callback_data='MULTI_ON',
+                                     style=ButtonStyle.SUCCESS),
+                InlineKeyboardButton(text=f'⬜ Выкл ({len(selected)})', callback_data='MULTI_OFF',
+                                     style=ButtonStyle.DANGER),
+            ])
+            keyboard.append([
+                InlineKeyboardButton(text='👥 Теги вкл', callback_data='MULTI_TAG_ON'),
+                InlineKeyboardButton(text='👥 Теги выкл', callback_data='MULTI_TAG_OFF'),
+            ])
+            keyboard.append([InlineKeyboardButton(text='⏱ Интервал выбранным',
+                                                  callback_data='MULTI_TIMEOUT')])
+        keyboard.append([InlineKeyboardButton(text='✖ Выйти из выбора', callback_data='BACK_TO_CHATS')])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard), multi_header(len(selected))
+
     # Вкладки фильтра со счётчиками
     off_count = total - active
     tabs = [
@@ -812,6 +905,7 @@ async def get_chats_keyboard(page=0, filt='all'):
             pagination.append(InlineKeyboardButton(text='➡️', callback_data=f'CHATS_PAGE:{page+1}:{filt}'))
         keyboard.append(pagination)
 
+    keyboard.append([InlineKeyboardButton(text='☑️ Выбрать несколько', callback_data=f'MULTI_MODE:{page}:{filt}')])
     keyboard.append([InlineKeyboardButton(text='➕ Добавить чат', callback_data='ADD_CHAT',
                                           style=ButtonStyle.SUCCESS)])
     return InlineKeyboardMarkup(inline_keyboard=keyboard), chats_header(total, active, filt)
@@ -875,6 +969,10 @@ class settings_state(StatesGroup):
 
 class topic_state(StatesGroup):
     id = State()
+
+
+class multi_state(StatesGroup):
+    timeout = State()
 
 
 @router.message(Command("start"))
@@ -1115,6 +1213,9 @@ async def chat_settings_menu(message: Message):
     if await _deny_if_not_admin(message):
         return
     await _clean_trigger(message)
+    uid = message.from_user.id if message.from_user else 0
+    multi_mode.discard(uid)
+    multi_sel.pop(uid, None)
     keyboard, header = await get_chats_keyboard(0)
     await message.answer(header, reply_markup=keyboard)
 
@@ -1194,7 +1295,8 @@ async def handle_code_button(c: CallbackQuery, state: FSMContext):
                 hint = result.get("hint", "")
                 hint_text = f"\nПодсказка: {hint}" if hint else ""
                 await c.message.edit_text(
-                    f"Требуется пароль 2FA.{hint_text}\n\nВведите пароль:")
+                    f"Требуется пароль 2FA.{hint_text}\n\nВведите пароль:",
+                    reply_markup=cancel_kb())
                 await state.update_data({'pwd_prompt_id': c.message.message_id})
                 await state.set_state(login_password.password)
                 await c.answer()
@@ -1353,6 +1455,10 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
             db.c.execute('UPDATE CHANNELS SET SPAM_ENABLED = 1 WHERE CHANNEL = ?', [str(chat_id)])
             db.conn.commit()
             toast = '✅ Рассылка включена'
+        try:
+            db.bump_sort(chat_id)  # недавно переключённый — наверх
+        except Exception:
+            pass
         keyboard, header = await get_chats_keyboard(page, filt)
         try:
             await c.message.edit_text(header, reply_markup=keyboard, parse_mode=ParseMode.HTML)
@@ -1363,6 +1469,75 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
                 pass
         await c.answer(toast)
 
+    elif data.startswith('MULTI_MODE:'):
+        sp = data.split(':')
+        page = int(sp[1]) if len(sp) > 1 and sp[1].lstrip('-').isdigit() else 0
+        filt = sp[2] if len(sp) > 2 and sp[2] in CHAT_FILTERS else 'all'
+        admin = _admin_key(c)
+        multi_mode.add(admin)
+        multi_sel.setdefault(admin, set())
+        await _render_select(c, page, filt)
+
+    elif data.startswith('SELECT_CHAT:'):
+        parts = data.split(':')
+        chat_id = int(parts[1])
+        page = int(parts[2]) if len(parts) > 2 and parts[2].lstrip('-').isdigit() else 0
+        filt = parts[3] if len(parts) > 3 and parts[3] in CHAT_FILTERS else 'all'
+        admin = _admin_key(c)
+        if admin not in multi_mode:
+            await c.answer()
+            return
+        sel = multi_sel.setdefault(admin, set())
+        if chat_id in sel:
+            sel.discard(chat_id)
+        else:
+            sel.add(chat_id)
+        await _render_select(c, page, filt)
+
+    elif data.startswith('SELECT_PAGE:'):
+        sp = data.split(':')
+        page = int(sp[1]) if len(sp) > 1 and sp[1].lstrip('-').isdigit() else 0
+        filt = sp[2] if len(sp) > 2 and sp[2] in CHAT_FILTERS else 'all'
+        await _render_select(c, page, filt)
+
+    elif data.startswith('SELECT_FILTER:'):
+        filt = data.split(':')[1] if ':' in data else 'all'
+        if filt not in CHAT_FILTERS:
+            filt = 'all'
+        await _render_select(c, 0, filt)
+
+    elif data in ('MULTI_ON', 'MULTI_OFF'):
+        admin = _admin_key(c)
+        sel = sorted(multi_sel.get(admin, set()))
+        if not sel:
+            await c.answer('Ничего не выбрано', show_alert=True)
+            return
+        n = db.set_spam_many(sel, 1 if data == 'MULTI_ON' else 0)
+        await c.answer(f'{"✅ Включено" if data == "MULTI_ON" else "⬜ Выключено"}: {n}')
+        await _render_select(c, 0, 'all')
+
+    elif data in ('MULTI_TAG_ON', 'MULTI_TAG_OFF'):
+        admin = _admin_key(c)
+        sel = sorted(multi_sel.get(admin, set()))
+        if not sel:
+            await c.answer('Ничего не выбрано', show_alert=True)
+            return
+        n = db.set_tag_many(sel, 1 if data == 'MULTI_TAG_ON' else 0)
+        await c.answer(f'👥 Отметки {"включены" if data == "MULTI_TAG_ON" else "выключены"}: {n}')
+        await _render_select(c, 0, 'all')
+
+    elif data == 'MULTI_TIMEOUT':
+        admin = _admin_key(c)
+        sel = sorted(multi_sel.get(admin, set()))
+        if not sel:
+            await c.answer('Ничего не выбрано', show_alert=True)
+            return
+        await state.set_data({'ids': sel, 'prompt_id': c.message.message_id})
+        await c.message.edit_text(f'⏱ Введи минимум (мин.) для {len(sel)} чатов:',
+                                  reply_markup=cancel_kb())
+        await state.set_state(multi_state.timeout)
+        await c.answer()
+
     elif data.startswith('TOGGLE_SPAM_SETTINGS:'):
         chat_id = int(data.split(':')[1])
         current = db.get_channel_spam_status(chat_id)
@@ -1371,6 +1546,10 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         else:
             db.c.execute('UPDATE CHANNELS SET SPAM_ENABLED = 1 WHERE CHANNEL = ?', [str(chat_id)])
             db.conn.commit()
+        try:
+            db.bump_sort(chat_id)
+        except Exception:
+            pass
         await c.message.edit_text(format_chat_info(chat_id),
                                   reply_markup=get_chat_settings_keyboard(chat_id),
                                   parse_mode=ParseMode.HTML)
@@ -1420,19 +1599,22 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
 
     elif data == 'INPUT_CHAT_ID':
         await state.set_data({'prompt_id': c.message.message_id})
-        await c.message.edit_text('Отправьте ID чата (например: -1001234567890):')
+        await c.message.edit_text('Отправьте ID чата (например: -1001234567890):',
+                                  reply_markup=cancel_kb())
         await state.set_state(add_chat_state.id)
         await c.answer()
 
     elif data == 'INPUT_CHAT_USERNAME':
         await state.set_data({'prompt_id': c.message.message_id})
-        await c.message.edit_text('Отправьте username чата (например: @mychannel):')
+        await c.message.edit_text('Отправьте username чата (например: @mychannel):',
+                                  reply_markup=cancel_kb())
         await state.set_state(add_chat_state.username)
         await c.answer()
 
     elif data == 'INPUT_CHAT_LINK':
         await state.set_data({'prompt_id': c.message.message_id})
-        await c.message.edit_text('Отправьте ссылку на чат (например: https://t.me/mychannel):')
+        await c.message.edit_text('Отправьте ссылку на чат (например: https://t.me/mychannel):',
+                                  reply_markup=cancel_kb())
         await state.set_state(add_chat_state.link)
         await c.answer()
 
@@ -1485,6 +1667,9 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
             await c.answer(f'Ошибка: {e}', show_alert=True)
 
     elif data == 'BACK_TO_CHATS':
+        admin = _admin_key(c)
+        multi_mode.discard(admin)
+        multi_sel.pop(admin, None)
         keyboard, header = await get_chats_keyboard(0)
         try:
             await c.message.edit_text(header, reply_markup=keyboard, parse_mode=ParseMode.HTML)
@@ -1499,20 +1684,30 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         chat_id = int(data.split(':')[1])
         await state.set_data({'chat_id': chat_id, 'prompt_id': c.message.message_id})
         cur = db.get_channel_timeout(chat_id)
-        await c.message.edit_text(f'Текущий интервал чата: {cur} мин.\nВведите новый интервал (в минутах):')
+        await c.message.edit_text(f'Текущий минимум чата: {cur} мин.\nВведи новый минимум (в минутах):',
+                                  reply_markup=cancel_kb())
         await state.set_state(channel_time.timeout)
         await c.answer()
 
     elif data.startswith('ADD_ADDITIONAL:'):
         chat_id = int(data.split(':')[1])
         await state.set_data({'chat_id': chat_id, 'prompt_id': c.message.message_id})
-        await c.message.edit_text('Введите дополнительный текст для чата:' + MARKDOWN_HINT)
+        await c.message.edit_text('Введите дополнительный текст для чата:' + MARKDOWN_HINT,
+                                  reply_markup=cancel_kb())
         await state.set_state(addition.id)
         await c.answer()
 
     elif data.startswith('TOPIC:'):
         chat_id = int(data.split(':')[1])
         await state.set_data({'chat_id': chat_id, 'prompt_id': c.message.message_id})
+        try:
+            await user.refresh_forum_flag(chat_id, db, force=True)
+        except Exception:
+            pass
+        try:
+            is_forum, _ = db.get_forum(chat_id)
+        except Exception:
+            is_forum = 1
         try:
             topics = await user.get_forum_topics(chat_id)
         except Exception as e:
@@ -1530,10 +1725,15 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
                 text=f'🧵 {label}', callback_data=f"TOPIC_SET:{chat_id}:{t['id']}")])
         rows.append([InlineKeyboardButton(text='🔢 Ввести ID темы', callback_data=f'TOPIC_MANUAL:{chat_id}')])
         rows.append([InlineKeyboardButton(text='⬅️ К чату', callback_data=f'EDIT_CHAT:{chat_id}')])
-        await c.message.edit_text(
-            '🧵 <b>Выбери тему форума</b> — посты пойдут ответом в неё:' if topics
-            else '🧵 Это не форум (тем нет) — шлём в общую ленту.\nМожешь задать ID вручную:',
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        if topics:
+            header = '🧵 <b>Выбери тему форума</b> — посты пойдут ответом в неё:'
+        elif not is_forum:
+            header = ('Это не форум-группа — веток нет, шлём в общую ленту.\n'
+                      'Если форум только включили — темы появятся чуть позже.')
+        else:
+            header = ('🧵 Своих тем пока нет — всё идёт в General.\n'
+                      'Можешь задать ID вручную:')
+        await c.message.edit_text(header, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
         await c.answer()
 
     elif data.startswith('TOPIC_SET:'):
@@ -1560,7 +1760,8 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         chat_id = int(data.split(':')[1])
         await state.set_data({'chat_id': chat_id, 'prompt_id': c.message.message_id})
         await c.message.edit_text('Отправь ID темы (число из ссылки на тему) '
-                                  'или 0 / General для общей ленты:')
+                                  'или 0 / General для общей ленты:',
+                                  reply_markup=cancel_kb())
         await state.set_state(topic_state.id)
         await c.answer()
 
@@ -1650,28 +1851,30 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
     elif data.startswith('CHANNEL_EDIT_TEXT:'):
         chat_id = int(data.split(':')[1])
         await state.set_data({'chat_id': chat_id, 'prompt_id': c.message.message_id})
-        await c.message.edit_text('Введите текст поста чата:' + MARKDOWN_HINT)
+        await c.message.edit_text('Введите текст поста чата:' + MARKDOWN_HINT,
+                                  reply_markup=cancel_kb())
         await state.set_state(channel_post_text.text)
         await c.answer()
 
     elif data.startswith('CHANNEL_EDIT_PHOTO:'):
         chat_id = int(data.split(':')[1])
         await state.set_data({'chat_id': chat_id, 'prompt_id': c.message.message_id})
-        await c.message.edit_text('Отправь фото для поста чата:')
+        await c.message.edit_text('Отправь фото для поста чата:', reply_markup=cancel_kb())
         await state.set_state(channel_post_photo.photo)
         await c.answer()
 
     elif data.startswith('CHANNEL_EDIT_VIDEO:'):
         chat_id = int(data.split(':')[1])
         await state.set_data({'chat_id': chat_id, 'prompt_id': c.message.message_id})
-        await c.message.edit_text('Отправь видео для поста чата:')
+        await c.message.edit_text('Отправь видео для поста чата:', reply_markup=cancel_kb())
         await state.set_state(channel_post_video.video)
         await c.answer()
 
     elif data.startswith('CHANNEL_EDIT_FORWARD:'):
         chat_id = int(data.split(':')[1])
         await state.set_data({'chat_id': chat_id, 'prompt_id': c.message.message_id})
-        await c.message.edit_text('📨 Перешли сюда пост из канала — этот чат будет получать его как есть.')
+        await c.message.edit_text('📨 Перешли сюда пост из канала — этот чат будет получать его как есть.',
+                                  reply_markup=cancel_kb())
         await state.set_state(channel_post_forward.forward)
         await c.answer()
 
@@ -1684,7 +1887,8 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
 
     elif data == 'EDIT_TEXT':
         await state.set_data({'prompt_id': c.message.message_id})
-        await c.message.edit_text('Введите текст глобального поста:' + MARKDOWN_HINT)
+        await c.message.edit_text('Введите текст глобального поста:' + MARKDOWN_HINT,
+                                  reply_markup=cancel_kb())
         await state.set_state(post.text)
         await c.answer()
 
@@ -1739,20 +1943,21 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
 
     elif data == 'EDIT_PHOTO':
         await state.set_data({'prompt_id': c.message.message_id})
-        await c.message.edit_text('Отправь фото для глобального поста:')
+        await c.message.edit_text('Отправь фото для глобального поста:', reply_markup=cancel_kb())
         await state.set_state(global_post_photo.photo)
         await c.answer()
 
     elif data == 'EDIT_VIDEO':
         await state.set_data({'prompt_id': c.message.message_id})
-        await c.message.edit_text('Отправь видео для глобального поста:')
+        await c.message.edit_text('Отправь видео для глобального поста:', reply_markup=cancel_kb())
         await state.set_state(global_post_video.video)
         await c.answer()
 
     elif data == 'EDIT_FORWARD':
         await state.set_data({'prompt_id': c.message.message_id})
         await c.message.edit_text('📨 Перешли сюда пост из канала — буду рассылать его как есть '
-                                  '(форматирование и премиум-эмодзи сохранятся).')
+                                  '(форматирование и премиум-эмодзи сохранятся).',
+                                  reply_markup=cancel_kb())
         await state.set_state(global_post_forward.forward)
         await c.answer()
 
@@ -1775,6 +1980,14 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
             except Exception:
                 pass
         await c.answer()
+
+    elif data == 'CANCEL_INPUT':
+        try:
+            await c.message.delete()
+        except Exception:
+            pass
+        await state.clear()
+        await c.answer('Отменено')
 
     elif data == 'SET_TOGGLE_LOG':
         cur_on, _ = db.get_log_config()
@@ -1814,7 +2027,11 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         await c.message.edit_text(
             '📋 Перешли сюда любое сообщение из канала/чата для лога — возьму его ID.\n'
             'Либо отправь ID (-100...) или @username.\n\n/cancel — отмена.',
-            reply_markup=back_to_settings_kb())
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text='⬅️ К настройкам', callback_data='SETTINGS_BACK')],
+                [InlineKeyboardButton(text='❌ Отмена', callback_data='CANCEL_INPUT',
+                                      style=ButtonStyle.DANGER)],
+            ]))
         await state.set_state(settings_state.log_chat)
         await c.answer()
 
@@ -1891,6 +2108,7 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         await c.answer('🧹 Статусы отправок сброшены')
 
     elif data == 'SETTINGS_BACK':
+        await state.clear()
         text, kb = build_settings_card()
         try:
             await c.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
@@ -1908,7 +2126,8 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
     elif data == 'INTERVAL':
         settings = db.settings()
         await state.set_data({'prompt_id': c.message.message_id})
-        await c.message.edit_text(f'Текущий интервал: {settings[5]} мин.\nВведите новый интервал:')
+        await c.message.edit_text(f'Текущий минимум: {settings[5]} мин.\nВведи новый минимум:',
+                                  reply_markup=cancel_kb())
         await state.set_state(global_time.timeout)
         await c.answer()
 
@@ -1952,13 +2171,10 @@ async def input_chat_id(m: Message, state: FSMContext):
     await _clean_trigger(m)
     try:
         db.add_channel(chat_id)
-        await _edit_or_send(m.chat.id, prompt,
-                            f'✅ Чат {chat_id} добавлен!',
-                            back_to_chats_kb())
     except Exception as e:
-        await _edit_or_send(m.chat.id, prompt, f'Ошибка: {e}', back_to_chats_kb())
-    finally:
-        await state.clear()
+        await _complete_input(m, state, f'Ошибка: {e}', back_to_chats_kb())
+        return
+    await _complete_input(m, state, f'✅ Чат {chat_id} добавлен!', back_to_chats_kb())
 
 
 @router.message(add_chat_state.username)
@@ -1970,10 +2186,8 @@ async def input_chat_username(m: Message, state: FSMContext):
     username = (m.text or '').strip()
     await _clean_trigger(m)
     if not await user.ensure_connected():
-        await _edit_or_send(m.chat.id, prompt,
-                            'Pyrogram не подключен. Используй /login',
-                            back_to_chats_kb())
-        await state.clear()
+        await _complete_input(m, state, 'Pyrogram не подключен. Используй /login',
+                              back_to_chats_kb())
         return
     username = username.lstrip('@')
     if not username:
@@ -1988,10 +2202,9 @@ async def input_chat_username(m: Message, state: FSMContext):
                             f'❌ Не нашёл чат: {html.escape(str(e))}\nПопробуйте снова.')
         return
     db.add_channel(chat.id)
-    await _edit_or_send(m.chat.id, prompt,
-                        f'✅ Чат @{html.escape(username)} (ID: {chat.id}) добавлен!',
-                        back_to_chats_kb())
-    await state.clear()
+    await _complete_input(m, state,
+                          f'✅ Чат @{html.escape(username)} (ID: {chat.id}) добавлен!',
+                          back_to_chats_kb())
 
 
 @router.message(add_chat_state.link)
@@ -2003,10 +2216,8 @@ async def input_chat_link(m: Message, state: FSMContext):
     link = (m.text or '').strip()
     await _clean_trigger(m)
     if not await user.ensure_connected():
-        await _edit_or_send(m.chat.id, prompt,
-                            'Pyrogram не подключен. Используй /login',
-                            back_to_chats_kb())
-        await state.clear()
+        await _complete_input(m, state, 'Pyrogram не подключен. Используй /login',
+                              back_to_chats_kb())
         return
     import re as _re
     match = _re.search(r't\.me/(?:joinchat/|[+])?([a-zA-Z0-9_]+)', link)
@@ -2021,10 +2232,9 @@ async def input_chat_link(m: Message, state: FSMContext):
                             f'❌ Не нашёл чат: {html.escape(str(e))}\nПопробуйте снова.')
         return
     db.add_channel(chat.id)
-    await _edit_or_send(m.chat.id, prompt,
-                        f'✅ Чат {html.escape(chat.title or match.group(1))} (ID: {chat.id}) добавлен!',
-                        back_to_chats_kb())
-    await state.clear()
+    await _complete_input(m, state,
+                          f'✅ Чат {html.escape(chat.title or match.group(1))} (ID: {chat.id}) добавлен!',
+                          back_to_chats_kb())
 
 
 def _parse_log_target(m: Message):
@@ -2059,10 +2269,8 @@ async def input_log_chat(m: Message, state: FSMContext):
                                 '❌ Перешли сообщение из лог-канала или отправь ID/@username.')
             return
         if not await user.ensure_connected():
-            await _edit_or_send(m.chat.id, prompt,
-                                'Pyrogram не подключен. Используй /login',
-                                back_to_settings_kb())
-            await state.clear()
+            await _complete_input(m, state, 'Pyrogram не подключен. Используй /login',
+                                  back_to_settings_kb())
             return
         try:
             await user.client.send_message(dest, '✅ Лог отправок подключён: сюда будут падать копии постов.')
@@ -2074,16 +2282,60 @@ async def input_log_chat(m: Message, state: FSMContext):
         db.set_log_chat(dest)
         db.set_log_enabled(1)
         text, kb = build_settings_card()
-        await _edit_or_send(m.chat.id, prompt, f'✅ Лог-чат подключён!\n\n{text}', kb)
-        await state.clear()
+        await _complete_input(m, state, f'✅ Лог-чат подключён!\n\n{text}', kb)
     except Exception as e:
         logger.exception('input_log_chat упал')
+        await _complete_input(m, state, f'❌ Ошибка: {html.escape(str(e))}',
+                              back_to_settings_kb())
+
+
+async def _render_select(c: CallbackQuery, page: int, filt: str):
+    admin = _admin_key(c)
+    multi_mode.add(admin)
+    sel = multi_sel.setdefault(admin, set())
+    kb, header = await get_chats_keyboard(page, filt, select_mode=True, selected=frozenset(sel))
+    try:
+        await c.message.edit_text(header, reply_markup=kb, parse_mode=ParseMode.HTML)
+    except Exception:
         try:
-            await _edit_or_send(m.chat.id, prompt, f'❌ Ошибка: {html.escape(str(e))}',
-                                back_to_settings_kb())
+            await c.message.edit_reply_markup(reply_markup=kb)
         except Exception:
             pass
+    await c.answer()
+
+
+@router.message(multi_state.timeout)
+async def input_multi_timeout(m: Message, state: FSMContext):
+    if await _deny_if_not_admin(m):
         await state.clear()
+        return
+    data = await state.get_data()
+    ids = data.get('ids') or []
+    if not ids:
+        await _complete_input(m, state, 'Нечего применять — выбор пуст.', back_to_chats_kb())
+        return
+    try:
+        timeout = int((m.text or '').strip())
+    except (ValueError, AttributeError):
+        await _edit_or_send(m.chat.id, await _prompt_id(state),
+                            '❌ Введите число. Попробуйте снова:')
+        return
+    if timeout < 1:
+        await _edit_or_send(m.chat.id, await _prompt_id(state),
+                            '❌ Введите число больше 1. Попробуйте снова:')
+        return
+    ok = 0
+    for cid in ids:
+        try:
+            if db.set_channel_timeout(cid, timeout):
+                ok += 1
+        except Exception:
+            pass
+    uid = m.from_user.id if m.from_user else 0
+    multi_mode.discard(uid)
+    multi_sel.pop(uid, None)
+    await _complete_input(m, state, f'✅ Минимум {timeout} мин. — чатов: {ok}.',
+                          back_to_chats_kb())
 
 
 @router.message(topic_state.id)
@@ -2096,15 +2348,13 @@ async def input_topic_id(m: Message, state: FSMContext):
     prompt = data.get('prompt_id')
     await _clean_trigger(m)
     if not chat_id:
-        await _edit_or_send(m.chat.id, prompt, 'Не найден ID чата.', back_to_chats_kb())
-        await state.clear()
+        await _complete_input(m, state, 'Не найден ID чата.', back_to_chats_kb())
         return
     raw = (m.text or '').strip()
     if raw.lower() in ('general', 'общая', '0'):
         db.set_topic(chat_id, 0, 'General')
-        await _edit_or_send(m.chat.id, prompt, '✅ Тема: General (общая лента).',
-                            back_to_chat_kb(chat_id))
-        await state.clear()
+        await _complete_input(m, state, '✅ Тема: General (общая лента).',
+                              back_to_chat_kb(chat_id))
         return
     try:
         topic_id = int(raw)
@@ -2123,10 +2373,9 @@ async def input_topic_id(m: Message, state: FSMContext):
     except Exception:
         pass
     db.set_topic(chat_id, topic_id, name)
-    await _edit_or_send(m.chat.id, prompt,
-                        f'✅ Тема: {html.escape(name) if name else f"#{topic_id}"}.',
-                        back_to_chat_kb(chat_id))
-    await state.clear()
+    await _complete_input(m, state,
+                          f'✅ Тема: {html.escape(name) if name else f"#{topic_id}"}.',
+                          back_to_chat_kb(chat_id))
 
 
 @router.message(addition.id)
@@ -2136,22 +2385,16 @@ async def input_additional_text(m: Message, state: FSMContext):
         return
     data = await state.get_data()
     chat_id = data.get('chat_id')
-    prompt = data.get('prompt_id')
-    await _clean_trigger(m)
     if not chat_id:
-        await _edit_or_send(m.chat.id, prompt, 'Не найден ID чата.', back_to_chats_kb())
-        await state.clear()
+        await _complete_input(m, state, 'Не найден ID чата.', back_to_chats_kb())
         return
     try:
         db.add_additional_text(chat_id, message_to_html(m.text, m.entities))
     except Exception as e:
-        await _edit_or_send(m.chat.id, prompt, f'Ошибка: {e}', back_to_chat_kb(chat_id))
-        await state.clear()
+        await _complete_input(m, state, f'Ошибка: {e}', back_to_chat_kb(chat_id))
         return
-    await _edit_or_send(m.chat.id, prompt,
-                        f'✅ Доп. текст для чата {chat_id} обновлён.',
-                        back_to_chat_kb(chat_id))
-    await state.clear()
+    await _complete_input(m, state, f'✅ Доп. текст для чата {chat_id} обновлён.',
+                          back_to_chat_kb(chat_id))
 
 
 @router.message(post.text)
@@ -2159,18 +2402,12 @@ async def input_post_text(m: Message, state: FSMContext):
     if await _deny_if_not_admin(m):
         await state.clear()
         return
-    prompt = await _prompt_id(state)
-    await _clean_trigger(m)
     try:
         db.change_text(message_to_html(m.text, m.entities))
     except Exception as e:
-        await _edit_or_send(m.chat.id, prompt, f'Ошибка: {e}', back_to_global_kb())
-        await state.clear()
+        await _complete_input(m, state, f'Ошибка: {e}', back_to_global_kb())
         return
-    await _edit_or_send(m.chat.id, prompt,
-                        '✅ Текст общего поста обновлён.',
-                        back_to_global_kb())
-    await state.clear()
+    await _complete_input(m, state, '✅ Текст общего поста обновлён.', back_to_global_kb())
 
 
 @router.message(channel_post_text.text)
@@ -2178,25 +2415,18 @@ async def input_channel_post_text(m: Message, state: FSMContext):
     if await _deny_if_not_admin(m):
         await state.clear()
         return
-    data = await state.get_data()
-    chat_id = data.get('chat_id')
-    prompt = data.get('prompt_id')
-    await _clean_trigger(m)
+    chat_id = (await state.get_data()).get('chat_id')
     if not chat_id:
-        await _edit_or_send(m.chat.id, prompt, 'Не найден ID чата.', back_to_chats_kb())
-        await state.clear()
+        await _complete_input(m, state, 'Не найден ID чата.', back_to_chats_kb())
         return
     try:
         db.set_channel_post(chat_id, text=message_to_html(m.text, m.entities))
     except Exception as e:
-        await _edit_or_send(m.chat.id, prompt, f'Ошибка: {e}',
-                            back_to_channel_post_kb(chat_id))
-        await state.clear()
+        await _complete_input(m, state, f'Ошибка: {e}',
+                              back_to_channel_post_kb(chat_id))
         return
-    await _edit_or_send(m.chat.id, prompt,
-                        '✅ Текст поста чата обновлён.',
-                        back_to_channel_post_kb(chat_id))
-    await state.clear()
+    await _complete_input(m, state, '✅ Текст поста чата обновлён.',
+                          back_to_channel_post_kb(chat_id))
 
 
 @router.message(channel_post_photo.photo, F.photo)
@@ -2206,10 +2436,8 @@ async def input_channel_post_photo(m: Message, state: FSMContext):
         return
     data = await state.get_data()
     chat_id = data.get('chat_id')
-    prompt = data.get('prompt_id')
     if not chat_id:
-        await _edit_or_send(m.chat.id, prompt, 'Не найден ID чата.', back_to_chats_kb())
-        await state.clear()
+        await _complete_input(m, state, 'Не найден ID чата.', back_to_chats_kb())
         return
     if not m.photo:
         return  # ждём именно фото, состояние сохраняем
@@ -2218,14 +2446,10 @@ async def input_channel_post_photo(m: Message, state: FSMContext):
         filename = await save_telegram_file(file_id, f'channel_{chat_id}', '.jpg')
         db.set_channel_post(chat_id, photo=filename)
     except Exception as e:
-        await _edit_or_send(m.chat.id, prompt, f'Ошибка: {e}',
-                            back_to_channel_post_kb(chat_id))
-        await state.clear()
+        await _complete_input(m, state, f'Ошибка: {e}', back_to_channel_post_kb(chat_id))
         return
-    await _edit_or_send(m.chat.id, prompt,
-                        '✅ Фото поста чата обновлено.',
-                        back_to_channel_post_kb(chat_id))
-    await state.clear()
+    await _complete_input(m, state, '✅ Фото поста чата обновлено.',
+                          back_to_channel_post_kb(chat_id))
 
 
 @router.message(channel_post_video.video, F.video)
@@ -2235,10 +2459,8 @@ async def input_channel_post_video(m: Message, state: FSMContext):
         return
     data = await state.get_data()
     chat_id = data.get('chat_id')
-    prompt = data.get('prompt_id')
     if not chat_id:
-        await _edit_or_send(m.chat.id, prompt, 'Не найден ID чата.', back_to_chats_kb())
-        await state.clear()
+        await _complete_input(m, state, 'Не найден ID чата.', back_to_chats_kb())
         return
     if not m.video:
         return
@@ -2247,14 +2469,10 @@ async def input_channel_post_video(m: Message, state: FSMContext):
         filename = await save_telegram_file(file_id, f'channel_{chat_id}', '.mp4')
         db.set_channel_post(chat_id, video=filename)
     except Exception as e:
-        await _edit_or_send(m.chat.id, prompt, f'Ошибка: {e}',
-                            back_to_channel_post_kb(chat_id))
-        await state.clear()
+        await _complete_input(m, state, f'Ошибка: {e}', back_to_channel_post_kb(chat_id))
         return
-    await _edit_or_send(m.chat.id, prompt,
-                        '✅ Видео поста чата обновлено.',
-                        back_to_channel_post_kb(chat_id))
-    await state.clear()
+    await _complete_input(m, state, '✅ Видео поста чата обновлено.',
+                          back_to_channel_post_kb(chat_id))
 
 
 @router.message(global_post_photo.photo, F.photo)
@@ -2262,7 +2480,6 @@ async def download_global_photo(m: Message, state: FSMContext):
     if await _deny_if_not_admin(m):
         await state.clear()
         return
-    prompt = await _prompt_id(state)
     if not m.photo:
         return
     try:
@@ -2270,14 +2487,9 @@ async def download_global_photo(m: Message, state: FSMContext):
         filename = await save_telegram_file(file_id, 'global', '.jpg')
         db.change_photo(filename)
     except Exception as e:
-        await _edit_or_send(m.chat.id, prompt, f'Ошибка сохранения фото: {e}',
-                            back_to_global_kb())
-        await state.clear()
+        await _complete_input(m, state, f'Ошибка сохранения фото: {e}', back_to_global_kb())
         return
-    await _edit_or_send(m.chat.id, prompt,
-                        '✅ Фото общего поста обновлено.',
-                        back_to_global_kb())
-    await state.clear()
+    await _complete_input(m, state, '✅ Фото общего поста обновлено.', back_to_global_kb())
 
 
 @router.message(global_post_video.video, F.video)
@@ -2285,7 +2497,6 @@ async def download_global_video(m: Message, state: FSMContext):
     if await _deny_if_not_admin(m):
         await state.clear()
         return
-    prompt = await _prompt_id(state)
     if not m.video:
         return
     try:
@@ -2293,14 +2504,9 @@ async def download_global_video(m: Message, state: FSMContext):
         filename = await save_telegram_file(file_id, 'global', '.mp4')
         db.change_video(filename)
     except Exception as e:
-        await _edit_or_send(m.chat.id, prompt, f'Ошибка сохранения видео: {e}',
-                            back_to_global_kb())
-        await state.clear()
+        await _complete_input(m, state, f'Ошибка сохранения видео: {e}', back_to_global_kb())
         return
-    await _edit_or_send(m.chat.id, prompt,
-                        '✅ Видео общего поста обновлено.',
-                        back_to_global_kb())
-    await state.clear()
+    await _complete_input(m, state, '✅ Видео общего поста обновлено.', back_to_global_kb())
 
 
 @router.message(global_post_forward.forward)
@@ -2317,20 +2523,16 @@ async def input_global_forward(m: Message, state: FSMContext):
             return
         db.set_forward(fc, fm)
         title = await _forward_source_title(fc)
-        await _edit_or_send(
-            m.chat.id, prompt,
-            f'✅ Пост-пересылка сохранён (из {html.escape(title)}).\n'
-            f'Текст (если задан) уйдёт следом отдельным сообщением.',
-            back_to_global_kb())
-        await state.clear()
     except Exception as e:
         logger.exception('input_global_forward упал')
-        try:
-            await _edit_or_send(m.chat.id, prompt, f'❌ Ошибка: {html.escape(str(e))}',
-                                back_to_global_kb())
-        except Exception:
-            pass
-        await state.clear()
+        await _complete_input(m, state, f'❌ Ошибка: {html.escape(str(e))}',
+                              back_to_global_kb())
+        return
+    await _complete_input(
+        m, state,
+        f'✅ Пост-пересылка сохранён (из {html.escape(title)}).\n'
+        f'Текст (если задан) уйдёт следом отдельным сообщением.',
+        back_to_global_kb())
 
 
 @router.message(channel_post_forward.forward)
@@ -2343,8 +2545,7 @@ async def input_channel_post_forward(m: Message, state: FSMContext):
     prompt = data.get('prompt_id')
     await _clean_trigger(m)
     if not chat_id:
-        await _edit_or_send(m.chat.id, prompt, 'Не найден ID чата.', back_to_chats_kb())
-        await state.clear()
+        await _complete_input(m, state, 'Не найден ID чата.', back_to_chats_kb())
         return
     try:
         ok, fc, fm, err = await _capture_forward(m)
@@ -2353,19 +2554,15 @@ async def input_channel_post_forward(m: Message, state: FSMContext):
             return
         db.set_channel_forward(chat_id, fc, fm)
         title = await _forward_source_title(fc)
-        await _edit_or_send(
-            m.chat.id, prompt,
-            f'✅ Пост-пересылка для чата {chat_id} сохранён (из {html.escape(title)}).',
-            back_to_channel_post_kb(chat_id))
-        await state.clear()
     except Exception as e:
         logger.exception('input_channel_post_forward упал')
-        try:
-            await _edit_or_send(m.chat.id, prompt, f'❌ Ошибка: {html.escape(str(e))}',
-                                back_to_channel_post_kb(chat_id))
-        except Exception:
-            pass
-        await state.clear()
+        await _complete_input(m, state, f'❌ Ошибка: {html.escape(str(e))}',
+                              back_to_channel_post_kb(chat_id))
+        return
+    await _complete_input(
+        m, state,
+        f'✅ Пост-пересылка для чата {chat_id} сохранён (из {html.escape(title)}).',
+        back_to_channel_post_kb(chat_id))
 
 
 @router.message(global_time.timeout)
@@ -2386,13 +2583,10 @@ async def input_timeout(m: Message, state: FSMContext):
     try:
         db.setTimeOut(timeout)
     except Exception as e:
-        await _edit_or_send(m.chat.id, prompt, f'Ошибка: {e}', back_to_global_kb())
-        await state.clear()
+        await _complete_input(m, state, f'Ошибка: {e}', back_to_global_kb())
         return
-    await _edit_or_send(m.chat.id, prompt,
-                        f'✅ Интервал по умолчанию: {timeout} мин.',
-                        back_to_global_kb())
-    await state.clear()
+    await _complete_input(m, state, f'✅ Интервал по умолчанию: {timeout} мин.',
+                          back_to_global_kb())
 
 
 @router.message(channel_time.timeout)
@@ -2405,8 +2599,7 @@ async def input_channel_timeout(m: Message, state: FSMContext):
     prompt = data.get('prompt_id')
     await _clean_trigger(m)
     if not chat_id:
-        await _edit_or_send(m.chat.id, prompt, 'Не найден ID чата.', back_to_chats_kb())
-        await state.clear()
+        await _complete_input(m, state, 'Не найден ID чата.', back_to_chats_kb())
         return
     try:
         timeout = int((m.text or '').strip())
@@ -2419,13 +2612,10 @@ async def input_channel_timeout(m: Message, state: FSMContext):
     try:
         db.set_channel_timeout(chat_id, timeout)
     except Exception as e:
-        await _edit_or_send(m.chat.id, prompt, f'Ошибка: {e}', back_to_chat_kb(chat_id))
-        await state.clear()
+        await _complete_input(m, state, f'Ошибка: {e}', back_to_chat_kb(chat_id))
         return
-    await _edit_or_send(m.chat.id, prompt,
-                        f'✅ Интервал чата {chat_id}: {timeout} мин.',
-                        back_to_chat_kb(chat_id))
-    await state.clear()
+    await _complete_input(m, state, f'✅ Минимум чата {chat_id}: {timeout} мин.',
+                          back_to_chat_kb(chat_id))
 
 
 @router.message(login_phone.phone)
@@ -2545,7 +2735,10 @@ async def do_login(chat_id):
     user.login_phone = None
     user.login_password = None
     await user._delete_session()
-    return await bot.send_message(chat_id, '📱 Введите номер телефона (в формате +79001234567):\n\n/cancel — отмена.')
+    return await bot.send_message(
+        chat_id,
+        '📱 Введите номер телефона (в формате +79001234567):\n\n/cancel — отмена.',
+        reply_markup=cancel_kb())
 
 
 async def do_update_menu(chat_id):

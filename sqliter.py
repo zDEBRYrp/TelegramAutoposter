@@ -258,6 +258,9 @@ class DBConnection(object):
             self._ensure_column('SETTINGS', 'SYNC_SLOWMODE', 'INTEGER DEFAULT 1')
             self._ensure_column('CHANNELS', 'SYNC_SLOW', 'INTEGER DEFAULT 1')
             self._ensure_column('CHANNELS', 'TAG_ALL', 'INTEGER DEFAULT 0')
+            self._ensure_column('CHANNELS', 'IS_FORUM', 'INTEGER DEFAULT 1')
+            self._ensure_column('CHANNELS', 'FORUM_AT', 'REAL DEFAULT 0')
+            self._ensure_column('CHANNELS', 'SORT_TS', 'REAL DEFAULT 0')
             
             self.c.execute('SELECT * FROM SETTINGS WHERE ID = 1')
             if self.c.fetchone() is None:
@@ -621,15 +624,92 @@ class DBConnection(object):
         except Exception as e:
             logger.error(f"Ошибка переключения TAG_ALL: {e}")
             return False
+
+    def get_forum(self, channel_id: int) -> Tuple[int, float]:
+        """(is_forum, checked_at). Дефолт 1/0: пока не проверен — считаем
+        форумом и показываем выбор темы; проверка уточнит."""
+        try:
+            self.c.execute('SELECT IS_FORUM, FORUM_AT FROM CHANNELS WHERE CHANNEL = ?',
+                           [str(channel_id)])
+            row = self.c.fetchone()
+            if not row:
+                return 1, 0.0
+            return (1 if row[0] is None or row[0] else 0), float(row[1] or 0)
+        except Exception as e:
+            logger.error(f"Ошибка чтения флага форума: {e}")
+            return 1, 0.0
+
+    def set_forum(self, channel_id: int, is_forum: bool) -> bool:
+        try:
+            import time as _t
+            self.c.execute('UPDATE CHANNELS SET IS_FORUM = ?, FORUM_AT = ? WHERE CHANNEL = ?',
+                           [1 if is_forum else 0, _t.time(), str(channel_id)])
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка записи флага форума: {e}")
+            return False
     
     def stop_spam_for_channel(self, channel_id: int) -> bool:
         try:
             self.c.execute('UPDATE CHANNELS SET SPAM_ENABLED = 0 WHERE CHANNEL = ?', [str(channel_id)])
+            try:
+                import time as _t
+                self.c.execute('UPDATE CHANNELS SET SORT_TS = ? WHERE CHANNEL = ?',
+                               [_t.time(), str(channel_id)])
+            except Exception:
+                pass
             self.conn.commit()
             return True
         except Exception as e:
             logger.error(f"Ошибка остановки спама для канала: {e}")
             return False
+
+    def bump_sort(self, channel_id: int) -> bool:
+        """Пометить чат как недавно переключённый (наверх списка)."""
+        try:
+            import time as _t
+            self.c.execute('UPDATE CHANNELS SET SORT_TS = ? WHERE CHANNEL = ?',
+                           [_t.time(), str(channel_id)])
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка обновления порядка: {e}")
+            return False
+
+    def set_spam_many(self, ids, enabled: int) -> int:
+        """Вкл/выкл рассылку сразу для списка чатов. Возвращает число."""
+        ids = [str(i) for i in ids]
+        if not ids:
+            return 0
+        try:
+            self.c.execute(
+                f'UPDATE CHANNELS SET SPAM_ENABLED = ? WHERE CHANNEL IN '
+                f'({",".join("?" for _ in ids)})',
+                [1 if enabled else 0] + ids)
+            n = self.c.rowcount if self.c.rowcount is not None and self.c.rowcount >= 0 else 0
+            self.conn.commit()
+            return n
+        except Exception as e:
+            logger.error(f"Ошибка массового вкл/выкл: {e}")
+            return 0
+
+    def set_tag_many(self, ids, enabled: int) -> int:
+        """Вкл/выкл отметки сразу для списка чатов. Возвращает число."""
+        ids = [str(i) for i in ids]
+        if not ids:
+            return 0
+        try:
+            self.c.execute(
+                f'UPDATE CHANNELS SET TAG_ALL = ? WHERE CHANNEL IN '
+                f'({",".join("?" for _ in ids)})',
+                [1 if enabled else 0] + ids)
+            n = self.c.rowcount if self.c.rowcount is not None and self.c.rowcount >= 0 else 0
+            self.conn.commit()
+            return n
+        except Exception as e:
+            logger.error(f"Ошибка массовых отметок: {e}")
+            return 0
     
     def set_channel_timeout(self, channel_id: int, timeout: int) -> bool:
         try:
