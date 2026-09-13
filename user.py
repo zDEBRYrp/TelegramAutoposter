@@ -498,7 +498,7 @@ def strip_html_tags(s: str) -> str:
 
 # Кэш участников для скрытых отметок: chat_id -> (at, [user_id])
 _tag_cache: dict = {}
-TAG_LIMIT = 5  # максимум скрытых отметок на пост: больше 5 Telegram обычно не уведомляет
+TAG_LIMIT = 5  # дефолт скрытых отметок на пост (перекрывается TAG_COUNT чата 1..50)
 TAG_MEMBERS_TTL = 3600  # кэш списка участников (сек)
 TAG_ANCHOR = chr(0x2060)  # U+2060 WORD JOINER — невидимый якорь для отметок
 SLOWMODE_TTL = 3600  # как часто перепроверяем слоумод канала (сек)
@@ -506,16 +506,19 @@ SLOWMODE_TTL = 3600  # как часто перепроверяем слоумо
 
 async def get_tag_members(chat_id: int, limit: int = TAG_LIMIT):
     """ID участников чата для скрытых отметок (боты и удалённые — мимо).
-    Кэшируется на TAG_MEMBERS_TTL."""
+
+    Читаем с запасом (limit x4, минимум 50), чтобы выборка случайных была
+    честной даже при лимите 50. Кэшируется на TAG_MEMBERS_TTL."""
     now = _time.time()
     entry = _tag_cache.get(chat_id)
     if entry and now - entry[0] < TAG_MEMBERS_TTL:
         return list(entry[1])
     if not await ensure_connected():
         return list(entry[1]) if entry else []
+    want = max(int(limit or TAG_LIMIT), 50)
     ids = []
     try:
-        async for m in client.get_chat_members(chat_id, limit=limit * 2):
+        async for m in client.get_chat_members(chat_id, limit=want * 2):
             try:
                 u = m.user
                 if getattr(u, 'is_bot', False) or getattr(u, 'is_deleted', False):
@@ -523,7 +526,7 @@ async def get_tag_members(chat_id: int, limit: int = TAG_LIMIT):
                 ids.append(int(u.id))
             except Exception:
                 continue
-            if len(ids) >= limit:
+            if len(ids) >= want:
                 break
     except Exception as e:
         logger.error(f"Не смог прочитать участников {chat_id}: {e}")
@@ -534,6 +537,9 @@ async def get_tag_members(chat_id: int, limit: int = TAG_LIMIT):
 
 async def build_mentions(chat_id: int, db) -> str:
     """HTML-хвост со скрытыми отметками ('' если выключено/некого отмечать).
+
+    Сколько отмечать — TAG_COUNT чата (1..50, дефолт 5); выборка СЛУЧАЙНАЯ
+    каждый пост, чтобы уведомления расходились по всем, а не первым 5.
     Якоря — невидимые U+2060, сущности — text_mention через tg://user ссылки."""
     try:
         get_tag = getattr(db, 'get_tag_all', None)
@@ -541,15 +547,27 @@ async def build_mentions(chat_id: int, db) -> str:
             return ''
     except Exception:
         return ''
-    ids = await get_tag_members(chat_id)
+    try:
+        get_n = getattr(db, 'get_tag_count', None)
+        n = int(get_n(chat_id)) if get_n else TAG_LIMIT
+    except Exception:
+        n = TAG_LIMIT
+    try:
+        from sqliter import TAG_MIN as _TMIN, TAG_MAX as _TMAX
+        n = max(_TMIN, min(_TMAX, n))
+    except Exception:
+        n = max(1, min(50, n))
+    ids = await get_tag_members(chat_id, limit=n)
     if not ids:
         return ''
+    import random as _rnd
+    picked = _rnd.sample(ids, min(n, len(ids)))
     # Прогреваем пиров, иначе парсер выкинет неизвестных молча
     try:
-        await client.get_users(ids)
+        await client.get_users(picked)
     except Exception as e:
         logger.error(f"Прогрев пиров для отметок {chat_id}: {e}")
-    return ''.join(f'<a href="tg://user?id={i}">{TAG_ANCHOR}</a>' for i in ids)
+    return ''.join(f'<a href="tg://user?id={i}">{TAG_ANCHOR}</a>' for i in picked)
 
 
 def register_send_result(db, chat_id: int, ok: bool, err: str) -> bool:

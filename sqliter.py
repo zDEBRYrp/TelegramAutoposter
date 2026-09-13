@@ -11,6 +11,11 @@ logger = logging.getLogger(__name__)
 # Такие тексты markdown_to_html возвращает как есть, без повторной конвертации.
 HTML_READY_MARK = '\u200b'
 
+# Скрытые отметки: сколько случайных участников уведомлять (1..50, дефолт 5).
+TAG_MIN = 1
+TAG_MAX = 50
+TAG_DEFAULT = 5
+
 
 def entities_to_html(text: str, entities) -> str:
     """Форматирование Telegram-клиента (entities) -> HTML.
@@ -483,6 +488,7 @@ class DBConnection(object):
             self._ensure_column('SETTINGS', 'SYNC_SLOWMODE', 'INTEGER DEFAULT 1')
             self._ensure_column('CHANNELS', 'SYNC_SLOW', 'INTEGER DEFAULT 1')
             self._ensure_column('CHANNELS', 'TAG_ALL', 'INTEGER DEFAULT 0')
+            self._ensure_column('CHANNELS', 'TAG_COUNT', 'INTEGER DEFAULT 5')
             self._ensure_column('CHANNELS', 'IS_FORUM', 'INTEGER DEFAULT 1')
             self._ensure_column('CHANNELS', 'FORUM_AT', 'REAL DEFAULT 0')
             self._ensure_column('CHANNELS', 'SORT_TS', 'REAL DEFAULT 0')
@@ -896,9 +902,46 @@ class DBConnection(object):
             self.c.execute('UPDATE CHANNELS SET TAG_ALL = ? WHERE CHANNEL = ?',
                            [1 if enabled else 0, str(channel_id)])
             self.conn.commit()
+            # Включили отметки, а число не задано — ставим дефолт 5
+            if enabled:
+                try:
+                    if self.get_tag_count(channel_id) < 1:
+                        self.set_tag_count(channel_id, TAG_DEFAULT)
+                except Exception:
+                    pass
             return True
         except Exception as e:
             logger.error(f"Ошибка переключения TAG_ALL: {e}")
+            return False
+
+    def get_tag_count(self, channel_id: int) -> int:
+        """Сколько случайных участников отмечать (1..50, дефолт 5)."""
+        try:
+            self.c.execute('SELECT TAG_COUNT FROM CHANNELS WHERE CHANNEL = ?',
+                           [str(channel_id)])
+            row = self.c.fetchone()
+            if not row or row[0] is None:
+                return TAG_DEFAULT
+            return max(TAG_MIN, min(TAG_MAX, int(row[0])))
+        except Exception as e:
+            logger.error(f"Ошибка чтения TAG_COUNT: {e}")
+            return TAG_DEFAULT
+
+    def set_tag_count(self, channel_id: int, n: int) -> bool:
+        """Задать число отметок 1..50 (вне диапазона — False, не пишем)."""
+        try:
+            n = int(n)
+        except (TypeError, ValueError):
+            return False
+        if not TAG_MIN <= n <= TAG_MAX:
+            return False
+        try:
+            self.c.execute('UPDATE CHANNELS SET TAG_COUNT = ? WHERE CHANNEL = ?',
+                           [n, str(channel_id)])
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка записи TAG_COUNT: {e}")
             return False
 
     def get_forum(self, channel_id: int) -> Tuple[int, float]:

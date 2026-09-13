@@ -516,6 +516,7 @@ BTN_UPDATE = '🔄 Обновление'
 BTN_HOME = '🏠 Главное меню'
 BTN_CLIST = '📋 Список постов'
 BTN_CADD = '➕ Новый пост'
+BTN_DELETE = '✖️ Удалить'  # без цвета: тихая уборка залипших панелей
 
 
 def welcome_keyboard():
@@ -523,7 +524,8 @@ def welcome_keyboard():
         [KeyboardButton(text=BTN_START, style=ButtonStyle.PRIMARY)],
         [KeyboardButton(text=BTN_POST), KeyboardButton(text=BTN_CHATS)],
         [KeyboardButton(text=BTN_CPOSTS), KeyboardButton(text=BTN_SETTINGS)],
-        [KeyboardButton(text=BTN_INFO), KeyboardButton(text=BTN_UPDATE)]
+        [KeyboardButton(text=BTN_INFO), KeyboardButton(text=BTN_UPDATE)],
+        [KeyboardButton(text=BTN_DELETE)],
     ], resize_keyboard=True)
 
 
@@ -532,7 +534,8 @@ def spam_running_keyboard():
         [KeyboardButton(text=BTN_STOP, style=ButtonStyle.DANGER)],
         [KeyboardButton(text=BTN_POST), KeyboardButton(text=BTN_CHATS)],
         [KeyboardButton(text=BTN_CPOSTS), KeyboardButton(text=BTN_SETTINGS)],
-        [KeyboardButton(text=BTN_INFO)]
+        [KeyboardButton(text=BTN_INFO)],
+        [KeyboardButton(text=BTN_DELETE)],
     ], resize_keyboard=True)
 
 
@@ -630,6 +633,10 @@ def get_chat_settings_keyboard(chat_id):
         tag_on = db.get_tag_all(chat_id) == 1
     except Exception:
         tag_on = False
+    try:
+        tag_n = db.get_tag_count(chat_id)
+    except Exception:
+        tag_n = 5
     rows = [
         [InlineKeyboardButton(text=spam_text, callback_data=f'TOGGLE_SPAM_SETTINGS:{chat_id}',
                               style=_toggle_style(spam_status == 1))],
@@ -639,9 +646,12 @@ def get_chat_settings_keyboard(chat_id):
         # Темы — только где есть ветки
         rows.append([InlineKeyboardButton(text=f'🧵 Тема: {_short(topic_label, 20)}',
                                           callback_data=f'TOPIC:{chat_id}')])
-    rows.append([InlineKeyboardButton(text=f'👥 Отмечать всех: {"✅" if tag_on else "❌"}',
+    rows.append([InlineKeyboardButton(text=f'👥 Отмечать (скрыто, {tag_n}): {"✅" if tag_on else "❌"}',
                                       callback_data=f'TOGGLE_TAG:{chat_id}',
                                       style=_toggle_style(tag_on))])
+    if tag_on:
+        # Число отметок правится только когда отметки включены
+        rows.append([InlineKeyboardButton(text=f'🔢 Отмечать: {tag_n} чел.', callback_data=f'TAG_COUNT:{chat_id}')])
     if slow:
         # Кнопка впритык — только где слоумод реально есть
         try:
@@ -791,6 +801,10 @@ def format_chat_info(chat_id: int) -> str:
     except Exception:
         tag_on = False
     try:
+        tag_n = db.get_tag_count(chat_id)
+    except Exception:
+        tag_n = 5
+    try:
         slow, slow_at = db.get_slowmode(chat_id)
     except Exception:
         slow, slow_at = 0, 0.0
@@ -820,7 +834,7 @@ def format_chat_info(chat_id: int) -> str:
             f'{"✅ Рассылка включена" if spam_status == 1 else "❌ Рассылка выключена"}\n'
             f'⏱ Интервал: {timeout_val} мин.{slow_line}\n'
             + (f'🧵 Тема: {topic_desc}\n' if is_forum else '') +
-            f'👥 Отметки: {"✅ всех" if tag_on else "❌ выкл"}\n'
+            f'👥 Отметки: {f"✅ {tag_n} чел. (случайные)" if tag_on else f"❌ выкл (будет {tag_n})"}\n'
             f'{_next_send_line(chat_id)}\n'
             f'💬 Доп. текст: {addit_val}\n'
             f'📝 Пост: {post_desc}\n'
@@ -1033,6 +1047,10 @@ class topic_state(StatesGroup):
     id = State()
 
 
+class tag_count_state(StatesGroup):
+    n = State()
+
+
 class multi_state(StatesGroup):
     timeout = State()
 
@@ -1165,6 +1183,20 @@ async def return_menu(message: Message):
         return
     await _clean_trigger(message)
     await message.answer('🏠 Главное меню:', reply_markup=welcome_keyboard())
+
+@router.message(F.text == BTN_DELETE)
+async def delete_panel(message: Message):
+    """✖️ Удалить: тихая уборка залипшей панели — удаляем сообщение юзера
+    (кнопку) и последнее сообщение бота над ним. Ничего не спрашиваем."""
+    if await _deny_if_not_admin(message):
+        return
+    chat_id = message.chat.id
+    try:
+        bot_msg_id = message.message_id - 1
+        await bot.delete_message(chat_id, bot_msg_id)
+    except Exception:
+        pass
+    await _clean_trigger(message)
 
 def build_global_post_card() -> tuple[str, InlineKeyboardMarkup]:
     settings = db.settings()
@@ -1636,10 +1668,48 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         except Exception:
             cur = False
         db.set_tag_all(chat_id, 0 if cur else 1)
+        try:
+            n = db.get_tag_count(chat_id)
+        except Exception:
+            n = 5
         await c.message.edit_text(format_chat_info(chat_id),
                                   reply_markup=get_chat_settings_keyboard(chat_id),
                                   parse_mode=ParseMode.HTML)
-        await c.answer('👥 Отметки выключены' if cur else '👥 Будем отмечать всех (скрыто)')
+        await c.answer('👥 Отметки выключены' if cur else f'👥 Отмечаем {n} случайных (скрыто)')
+
+    elif data.startswith('TAG_COUNT:'):
+        chat_id = int(data.split(':')[1])
+        try:
+            n = db.get_tag_count(chat_id)
+        except Exception:
+            n = 5
+        rows = [
+            [InlineKeyboardButton(text=f'{x} чел.', callback_data=f'TAG_SET:{chat_id}:{x}')]
+            for x in (1, 3, 5, 10, 20, 50)
+        ]
+        rows.append([InlineKeyboardButton(text='⬅️ К чату', callback_data=f'EDIT_CHAT:{chat_id}')])
+        await c.message.edit_text(
+            f'{_chat_link(chat_id)}\n👥 Сколько случайных отмечать? Сейчас: <b>{n}</b>.\n'
+            f'Можно и вручную: отправь число 1–50.',
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+            parse_mode=ParseMode.HTML)
+        await state.set_data({'chat_id': chat_id, 'prompt_id': c.message.message_id})
+        await state.set_state(tag_count_state.n)
+        await c.answer()
+
+    elif data.startswith('TAG_SET:'):
+        _, chat_s, n_s = data.split(':')
+        chat_id = int(chat_s)
+        try:
+            n = max(1, min(50, int(n_s)))
+        except (TypeError, ValueError):
+            await c.answer('Нужно число 1–50', show_alert=True)
+            return
+        db.set_tag_count(chat_id, n)
+        await c.message.edit_text(format_chat_info(chat_id),
+                                  reply_markup=get_chat_settings_keyboard(chat_id),
+                                  parse_mode=ParseMode.HTML)
+        await c.answer(f'👥 Отмечаем {n} случайных')
 
     elif data.startswith('EDIT_CHAT:'):
         chat_id = int(data.split(':')[1])
@@ -2445,6 +2515,32 @@ async def input_topic_id(m: Message, state: FSMContext):
     db.set_topic(chat_id, topic_id, name)
     await _complete_input(m, state,
                           f'✅ Тема: {html.escape(name) if name else f"#{topic_id}"}.',
+                          back_to_chat_kb(chat_id))
+
+
+@router.message(tag_count_state.n)
+async def input_tag_count(m: Message, state: FSMContext):
+    if await _deny_if_not_admin(m):
+        await state.clear()
+        return
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+    prompt = data.get('prompt_id')
+    await _clean_trigger(m)
+    if not chat_id:
+        await _complete_input(m, state, 'Не найден ID чата.', back_to_chats_kb())
+        return
+    try:
+        n = int((m.text or '').strip())
+    except (TypeError, ValueError, AttributeError):
+        n = 0
+    if not 1 <= n <= 50:
+        await _edit_or_send(m.chat.id, prompt,
+                            f'{_chat_link(chat_id)}\n❌ Нужно число 1–50. Попробуй снова:',
+                            back_to_chat_kb(chat_id))
+        return
+    db.set_tag_count(chat_id, n)
+    await _complete_input(m, state, f'👥 Отмечаем {n} случайных (скрыто).',
                           back_to_chat_kb(chat_id))
 
 
