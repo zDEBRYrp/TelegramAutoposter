@@ -491,7 +491,17 @@ class DBConnection(object):
             if self.c.fetchone() is None:
                 self.c.execute('INSERT INTO SETTINGS (ID, PHOTO, VIDEO, TEXT, SPAM, TIMEOUT) VALUES (?, ?, ?, ?, ?, ?)',
                               [1, '', '', 'Текст по умолчанию', 0, 5])
-            
+
+            # v1.16.7: склейка соседних спойлеров в уже сохранённых постах.
+            # Старые записи хранят каждый #тег отдельным <tg-spoiler> (110+
+            # сущностей) — сервер молча режет хвост форматирования. После
+            # склейки те же посты весят ~20 сущностей и уходят одним сообщением.
+            # Видимый текст не меняется; уже склеенные не трогаем (идемпотентно).
+            try:
+                self._merge_stored_spoilers()
+            except Exception as e:
+                logger.warning(f"Миграция склейки спойлеров пропущена: {e}")
+
             self.conn.commit()
             logger.info("База данных инициализирована успешно")
             
@@ -508,6 +518,47 @@ class DBConnection(object):
                 logger.info(f"Миграция БД: {table}.{column} добавлена")
         except Exception as e:
             logger.error(f"Ошибка миграции {table}.{column}: {e}")
+
+    def _merge_stored_spoilers(self) -> int:
+        """Склеить соседние спойлеры в сохранённых текстах (SETTINGS.TEXT,
+        CHANNELS.POST_TEXT/ADDITIONAL). Возвращает число обновлённых строк."""
+        fixed = 0
+        targets = []
+        try:
+            row = self.c.execute('SELECT TEXT FROM SETTINGS WHERE ID = ?',
+                                 [1]).fetchone()
+            if row and row[0]:
+                targets.append(('SETTINGS', 'TEXT', 'ID', 1, row[0]))
+        except Exception:
+            pass
+        try:
+            cols = [r[1] for r in self.c.execute(
+                'PRAGMA table_info(CHANNELS)').fetchall()]
+            fields = [f for f in ('POST_TEXT', 'ADDITIONAL') if f in cols]
+            if fields:
+                sel = ', '.join(['CHANNEL'] + fields)
+                for r in self.c.execute(f'SELECT {sel} FROM CHANNELS').fetchall():
+                    cid = r[0]
+                    for i, f in enumerate(fields, start=1):
+                        if r[i]:
+                            targets.append(('CHANNELS', f, 'CHANNEL', cid, r[i]))
+        except Exception:
+            pass
+        for table, field, key, kid, val in targets:
+            try:
+                if isinstance(val, str) and '</tg-spoiler>' in val:
+                    new = merge_adjacent_same_tags(val)
+                    if new != val:
+                        self.c.execute(
+                            f'UPDATE {table} SET {field} = ? WHERE {key} = ?',
+                            [new, str(kid) if table == 'CHANNELS' else kid])
+                        fixed += 1
+            except Exception as e:
+                logger.warning(f"Склейка {table}.{field} {kid} пропущена: {e}")
+        if fixed:
+            self.conn.commit()
+            logger.info(f"Миграция БД: склеены спойлеры в {fixed} записях")
+        return fixed
     
     def add_additional_text(self, channel_id: int, text: str) -> bool:
         try:

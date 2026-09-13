@@ -114,3 +114,34 @@ def test_clear_channel_post(db):
     db.set_channel_post(CID, text='hello')
     db.clear_channel_post(CID)
     assert db.get_channel_post(CID) == ('', '', '')
+
+
+def test_stored_spoiler_migration(db):
+    """Старый пост со 110 отдельными спойлерами чинится сам при открытии БД."""
+    from sqliter import _count_entity_opens
+    # tg-spoiler НЕ входит в ENTITY_TAGS (считаем только финальный spoiler):
+    # для предусловия считаем в лоб по открывающим тегам
+    old = ('\u200b<b>head</b>\n'
+           + '<tg-spoiler>#t</tg-spoiler><tg-spoiler> </tg-spoiler>' * 55)
+    assert old.count('<tg-spoiler>') == 110
+    db.set_channel_post(CID, text=old)
+    # эмулируем перезапуск: новое подключение прогоняет миграцию
+    db.conn.commit()
+    from sqliter import DBConnection as _DBC
+    db2 = _DBC(db_path=db.db_path)
+    try:
+        _photo, _video, text = db2.get_channel_post(CID)
+    finally:
+        db2.c.close()
+        db2.conn.close()
+    assert _count_entity_opens(text) <= 90
+    assert text.count('<tg-spoiler>') <= 2  # стена склеилась в один-два
+    import re
+    strip = lambda s: re.sub(r'<[^>]+>', '', s)
+    assert strip(text) == strip(old)  # видимый текст не изменился
+
+
+def test_stored_spoiler_migration_idempotent(db):
+    n1 = db._merge_stored_spoilers()
+    n2 = db._merge_stored_spoilers()
+    assert n1 == 0 and n2 == 0  # чинить нечего — второй прогон ничего не меняет
