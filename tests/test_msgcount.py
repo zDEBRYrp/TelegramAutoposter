@@ -112,9 +112,17 @@ def test_log_media_long_stays_two(monkeypatch, tmp_path):
 
 
 def test_long_text_with_quote_keeps_formatting(monkeypatch):
-    """Длинный текст: цитата и спойлеры не теряются при нарезке."""
-    from sqliter import markdown_to_html
+    """Длинный текст: single-shot падает по длине TG — режем с целыми тегами."""
     c = CountClient()
+    seen = []
+
+    async def flaky(chat_id, text, parse_mode=None, reply_to_message_id=None):
+        seen.append(text)
+        if len(seen) == 1:
+            raise Exception('MESSAGE_TOO_LONG')  # TG отказал целиком
+        c.calls.append(('msg', text))
+
+    c.send_message = flaky
     monkeypatch.setattr(user, 'client', c)
     body = '<blockquote>' + ('line\n' * 500) + '</blockquote>\n' + '<spoiler>x</spoiler>' * 95
     stored = '\u200b' + body  # как message_to_html: уже готовый HTML, без markdown
@@ -128,10 +136,20 @@ def test_long_text_with_quote_keeps_formatting(monkeypatch):
 
 
 def test_long_caption_splits_not_plain(monkeypatch, tmp_path):
-    """Длинная подпись: первый кусок — подпись к фото, остальные — текст следом."""
+    """Длинная подпись: single-shot падает — первый кусок подписью, остальные текстом."""
     pic = tmp_path / 'p.jpg'
     pic.write_bytes(b'x')
     c = CountClient()
+    seen = []
+
+    async def flaky_photo(chat_id, photo, caption=None, parse_mode=None,
+                          reply_to_message_id=None):
+        seen.append(caption)
+        if len(seen) == 1:
+            raise Exception('CAPTION_TOO_LONG')  # TG отказал целиком
+        c.calls.append(('photo', caption))
+
+    c.send_photo = flaky_photo
     monkeypatch.setattr(user, 'client', c)
     body = '<b>head</b>\n' + '<spoiler>tag</spoiler>' * 120
     stored = '\u200b' + body  # уже готовый HTML
@@ -140,3 +158,50 @@ def test_long_caption_splits_not_plain(monkeypatch, tmp_path):
     assert c.calls[0][0] == 'photo'  # первый — подпись
     assert all(k == 'msg' for k, *_ in c.calls[1:])  # остальные — текст
     assert '<spoiler>' in ''.join((cap or '') for _k, cap in c.calls)
+
+
+def test_single_shot_first_no_premature_split(monkeypatch):
+    """Короткий пост: ровно один вызов — не режем заранее, верим Telegram."""
+    c = CountClient()
+    monkeypatch.setattr(user, 'client', c)
+    assert run(user._deliver(-10, '\u200b<b>hi</b>')) == (True, '')
+    assert c.calls == [('msg', '<b>hi</b>')]
+
+
+def test_splits_only_on_length_error(monkeypatch):
+    """Parse-ошибка — НЕ повод резать: чиним/падаем, а не плодим куски."""
+    c = CountClient()
+    calls = []
+
+    async def boom(chat_id, text, parse_mode=None, reply_to_message_id=None):
+        calls.append((text, parse_mode))
+        if parse_mode is not None:
+            raise Exception("can't parse entities: ...")
+        return True
+
+    c.send_message = boom
+    monkeypatch.setattr(user, 'client', c)
+    ok, err = run(user._deliver(-10, '\u200b<b>hi</b>'))
+    assert ok is True  # plain-фолбэк одним сообщением
+    # HTML целиком, затем plain — резать было нечего и не пытались
+    assert [t for t, _pm in calls] == ['<b>hi</b>', 'hi']
+    assert calls[0][1] is not None and calls[1][1] is None
+
+
+def test_length_error_triggers_split(monkeypatch):
+    """Ответ TG message_too_long — режем на чанки с целыми тегами."""
+    c = CountClient()
+    seen = []
+
+    async def flaky(chat_id, text, parse_mode=None, reply_to_message_id=None):
+        seen.append(text)
+        if len(seen) == 1:
+            raise Exception('MESSAGE_TOO_LONG')
+        c.calls.append(('msg', text))
+
+    c.send_message = flaky
+    monkeypatch.setattr(user, 'client', c)
+    body = '\u200b<blockquote>' + ('line\n' * 1500) + '</blockquote>'
+    assert run(user._deliver(-10, body)) == (True, '')
+    assert len(c.calls) > 1
+    assert all('<blockquote>' in t for _k, t in c.calls)  # цитата жива в каждом

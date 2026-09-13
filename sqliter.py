@@ -52,8 +52,16 @@ def entities_to_html(text: str, entities) -> str:
         if t == 'blockquote':
             return '<blockquote>', '</blockquote>'
         if t == 'expandable_blockquote':
-            return '<blockquote expandable>', '</blockquote>'
-        return None, None  # custom_emoji и прочие: текст без тегов
+            # Pyrogram 2.x не знает collapsible-атрибут: шлём обычной цитатой.
+            # Сохранять надо сам ФАКТ цитаты (было: дропалась целиком),
+            # а не вид «сворачиваемая» — его MTProto этой версии не умеет.
+            return '<blockquote>', '</blockquote>'
+        if t == 'custom_emoji':
+            cid = getattr(ent, 'custom_emoji_id', None)
+            if cid:
+                return f'<emoji id="{_h.escape(str(cid), quote=True)}">', '</emoji>'
+            return None, None  # без id показать нечего — только текст
+        return None, None  # прочие: текст без тегов
 
     bounds = {0, total_units}
     spans = []
@@ -225,6 +233,28 @@ def _open_tag_pattern():
     return _OPEN_TAG_RE
 
 
+# Теги, которые Telegram считает сущностями (лимит ~100 на сообщение).
+# <emoji id="..."> (custom emoji) — тоже сущность: обязан учитываться
+# в лимите нарезки, иначе пост с премиум-эмодзи снова упадёт в plain.
+ENTITY_TAGS = frozenset({'b', 'i', 'u', 's', 'spoiler', 'blockquote',
+                         'code', 'pre', 'a', 'emoji'})
+
+# Компилированные паттерны баланса/подсчёта — строятся из ENTITY_TAGS,
+# чтобы добавление нового тега-сущности в одном месте чинило всё сразу.
+_BAL_O_RE = None
+_BAL_C_RE = None
+
+
+def _balance_patterns():
+    global _BAL_O_RE, _BAL_C_RE
+    if _BAL_O_RE is None:
+        import re as _re
+        alt = '|'.join(sorted(ENTITY_TAGS))
+        _BAL_O_RE = _re.compile(r'<(' + alt + r')(\s[^<>]*)?>')
+        _BAL_C_RE = _re.compile(r'</(' + alt + r')>')
+    return _BAL_O_RE, _BAL_C_RE
+
+
 def _tag_info(token: str):
     """(is_tag, closing, name) — мусор вроде '<3' считаем обычным текстом."""
     m = _open_tag_pattern().fullmatch(token)
@@ -251,24 +281,29 @@ def _cut_text_token(s: str, max_len: int) -> int:
     return cut if cut > 0 else (1 if s else 0)
 
 
+def _count_entity_opens(text_html: str) -> int:
+    """Число открывающих тегов-сущностей (см. ENTITY_TAGS)."""
+    pat_o, _pat_c = _balance_patterns()
+    return sum(1 for _ in pat_o.finditer(text_html))
+
+
 def split_html_smart(text_html: str, limit: int = 4000, max_entities: int = 90) -> list:
     """Нарезать HTML на куски, сохраняя форматирование.
 
     Гарантии на каждый кусок: длина (с тегами) <= limit, открывающих
-    тегов (сущностей Telegram) <= max_entities, теги сбалансированы
-    (разорванные закрываются в конце куска и открываются заново
-    в начале следующего — цитаты/спойлеры живут в каждом куске).
+    тегов-сущностей (см. ENTITY_TAGS: b/i/спойлер/цитата/emoji/...) <=
+    max_entities, теги сбалансированы (разорванные закрываются в конце
+    куска и открываются заново в начале следующего — цитаты/спойлеры
+    живут в каждом куске). Не-сущности ( technically все теги из
+    ENTITY_TAGS балансируются; чужой мусор вроде <div> идёт как текст).
     Токенизация «тег vs текст» даёт склейку текстового содержимого 1-в-1:
     retext(''.join(chunks)) == retext(text_html).
     Возвращает [text_html] если влезает целиком.
     """
     if not text_html:
         return [text_html]
-    if len(text_html) <= limit:
-        n_open = sum(1 for _m in _open_tag_pattern().finditer(text_html)
-                     if not _m.group(1))
-        if n_open <= max_entities:
-            return [text_html]
+    if len(text_html) <= limit and _count_entity_opens(text_html) <= max_entities:
+        return [text_html]
     # токены: теги целиком, текст между ними — как есть
     parts: list[tuple[str, str]] = []  # (kind, value), kind: 'tag' | 'text'
     pos = 0
@@ -283,7 +318,7 @@ def split_html_smart(text_html: str, limit: int = 4000, max_entities: int = 90) 
         parts.append(('text', text_html[pos:]))
 
     chunks: list[str] = []
-    stack: list = []  # (name, open_tag)
+    stack: list = []  # (name, open_tag) — только теги-сущности из ENTITY_TAGS
     cur_parts: list[str] = []
     cur_len = 0
     cur_ent = 0
@@ -328,16 +363,19 @@ def split_html_smart(text_html: str, limit: int = 4000, max_entities: int = 90) 
                     cur_parts, cur_len, cur_ent = [_openers()], len(_openers()), len(stack)
         else:
             _is_tag, closing, name = _tag_info(val)
-            add_ent = 0 if closing else 1
+            is_entity = name in ENTITY_TAGS
+            add_ent = (0 if closing else 1) if is_entity else 0
             # симулируем стек после токена для учёта длины закрывашек
+            # (чужой тег стек не меняет — симуляция = как есть)
             sim = list(stack)
-            if closing:
-                idx = next((i for i in range(len(sim) - 1, -1, -1)
-                            if sim[i][0] == name), None)
-                if idx is not None:
-                    del sim[idx:]
-            else:
-                sim.append((name, val))
+            if is_entity:
+                if closing:
+                    idx = next((i for i in range(len(sim) - 1, -1, -1)
+                                if sim[i][0] == name), None)
+                    if idx is not None:
+                        del sim[idx:]
+                else:
+                    sim.append((name, val))
             sim_closers = ''.join(f'</{n}>' for n, _o in reversed(sim))
             if (cur_len + len(val) + len(sim_closers) > limit
                     or cur_ent + add_ent > max_entities) and not _fresh():
@@ -351,7 +389,9 @@ def split_html_smart(text_html: str, limit: int = 4000, max_entities: int = 90) 
                     pass
             cur_parts.append(val)
             cur_len += len(val)
-            if closing:
+            if not is_entity:
+                pass  # чужой тег — как текст: стек/лимит сущностей не трогаем
+            elif closing:
                 idx = next((i for i in range(len(stack) - 1, -1, -1)
                             if stack[i][0] == name), None)
                 if idx is not None:

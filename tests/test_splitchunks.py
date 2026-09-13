@@ -1,10 +1,11 @@
 """Умная нарезка HTML: длина, баланс тегов, целостность текста."""
 import re
 
-from sqliter import split_html_smart
+from sqliter import ENTITY_TAGS, split_html_smart
 
-TAG_O = re.compile(r'<(b|i|u|s|spoiler|blockquote|code|pre|a)(\s[^<>]*)?>')
-TAG_C = re.compile(r'</(b|i|u|s|spoiler|blockquote|code|pre|a)>')
+_ALT = '|'.join(sorted(ENTITY_TAGS))
+TAG_O = re.compile(r'<(' + _ALT + r')(\s[^<>]*)?>')
+TAG_C = re.compile(r'</(' + _ALT + r')>')
 RE_TEXT = lambda s: re.sub(r'<[^>]+>', '', s)  # noqa: E731
 
 
@@ -57,3 +58,12 @@ def test_entity_cap_splits_spoiler_wall():
     assert len(chunks) > 1
     check(chunks, 4000)
     assert RETEXT(chunks) == RETEXT([body])
+
+
+def test_custom_emoji_counts_as_entity():
+    body = '<emoji id="1">x</emoji>' * 200
+    chunks = split_html_smart(body, 4000, max_entities=90)
+    assert len(chunks) > 1
+    check(chunks, 4000)
+    assert RETEXT(chunks) == RETEXT([body])
+    assert ''.join(chunks).count('<emoji') == 200

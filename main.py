@@ -310,24 +310,34 @@ def split_html(text_html: str, limit: int = TEXT_LIMIT) -> list[str]:
 
 
 async def send_post_preview(chat_id: int, media_path: str | None, text_html: str, is_video: bool = False):
-    """Предпросмотр поста: подпись режется своим лимитом (900), остальное —
-    текстом следом; форматирование в кусках целое (см. split_html)."""
+    """Предпросмотр поста 1-в-1: сначала целиком (подпись/текст одним
+    сообщением); режем на чанки только если Bot API отказал по длине."""
     if media_path:
         media = FSInputFile(media_path)
-        if text_html and len(text_html) > CAPTION_LIMIT:
-            chunks = split_html(text_html, CAPTION_LIMIT)
-            first, rest = chunks[0], chunks[1:]
+        try:
             if is_video:
-                await bot.send_video(chat_id, media, caption=first or None, parse_mode=ParseMode.HTML)
+                await bot.send_video(chat_id, media, caption=text_html or None, parse_mode=ParseMode.HTML)
             else:
-                await bot.send_photo(chat_id, media, caption=first or None, parse_mode=ParseMode.HTML)
-            for chunk in split_html('\n'.join(rest)) if rest else []:
-                await bot.send_message(chat_id, chunk, parse_mode=ParseMode.HTML)
-        elif is_video:
-            await bot.send_video(chat_id, media, caption=text_html or None, parse_mode=ParseMode.HTML)
+                await bot.send_photo(chat_id, media, caption=text_html or None, parse_mode=ParseMode.HTML)
+            return
+        except TelegramBadRequest as e:
+            if 'caption' not in str(e).lower() or 'too long' not in str(e).lower():
+                raise
+        chunks = split_html(text_html, CAPTION_LIMIT)
+        first, rest = chunks[0], chunks[1:]
+        if is_video:
+            await bot.send_video(chat_id, media, caption=first or None, parse_mode=ParseMode.HTML)
         else:
-            await bot.send_photo(chat_id, media, caption=text_html or None, parse_mode=ParseMode.HTML)
+            await bot.send_photo(chat_id, media, caption=first or None, parse_mode=ParseMode.HTML)
+        for chunk in split_html('\n'.join(rest)) if rest else []:
+            await bot.send_message(chat_id, chunk, parse_mode=ParseMode.HTML)
     elif text_html:
+        try:
+            await bot.send_message(chat_id, text_html, parse_mode=ParseMode.HTML)
+            return
+        except TelegramBadRequest as e:
+            if 'too long' not in str(e).lower() and 'too much' not in str(e).lower():
+                raise
         for chunk in split_html(text_html):
             await bot.send_message(chat_id, chunk, parse_mode=ParseMode.HTML)
 
@@ -2450,7 +2460,9 @@ async def input_channel_post_photo(m: Message, state: FSMContext):
     try:
         file_id = m.photo[-1].file_id
         filename = await save_telegram_file(file_id, f'channel_{chat_id}', '.jpg')
-        db.set_channel_post(chat_id, photo=filename)
+        db.set_channel_post(chat_id, photo=filename,
+                            text=message_to_html(m.caption, m.caption_entities)
+                            if m.caption else None)
     except Exception as e:
         await _complete_input(m, state, f'Ошибка: {e}', back_to_channel_post_kb(chat_id))
         return
@@ -2473,7 +2485,9 @@ async def input_channel_post_video(m: Message, state: FSMContext):
     try:
         file_id = m.video.file_id
         filename = await save_telegram_file(file_id, f'channel_{chat_id}', '.mp4')
-        db.set_channel_post(chat_id, video=filename)
+        db.set_channel_post(chat_id, video=filename,
+                            text=message_to_html(m.caption, m.caption_entities)
+                            if m.caption else None)
     except Exception as e:
         await _complete_input(m, state, f'Ошибка: {e}', back_to_channel_post_kb(chat_id))
         return
@@ -2492,6 +2506,10 @@ async def download_global_photo(m: Message, state: FSMContext):
         file_id = m.photo[-1].file_id
         filename = await save_telegram_file(file_id, 'global', '.jpg')
         db.change_photo(filename)
+        # Подпись фото — это его текст: сохраняем вместе с медиа,
+        # иначе фото приходит «голым», а текст теряется.
+        if m.caption:
+            db.change_text(message_to_html(m.caption, m.caption_entities))
     except Exception as e:
         await _complete_input(m, state, f'Ошибка сохранения фото: {e}', back_to_global_kb())
         return
@@ -2509,6 +2527,9 @@ async def download_global_video(m: Message, state: FSMContext):
         file_id = m.video.file_id
         filename = await save_telegram_file(file_id, 'global', '.mp4')
         db.change_video(filename)
+        # Подпись видео — это его текст: сохраняем вместе с медиа.
+        if m.caption:
+            db.change_text(message_to_html(m.caption, m.caption_entities))
     except Exception as e:
         await _complete_input(m, state, f'Ошибка сохранения видео: {e}', back_to_global_kb())
         return

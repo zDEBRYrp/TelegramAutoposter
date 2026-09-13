@@ -44,6 +44,17 @@ def test_blockquote():
     assert out == '<blockquote>q</blockquote>'
 
 
+def test_expandable_blockquote_kept_as_quote():
+    # Pyrogram 2.x не умеет collapsible: факт цитаты сохраняем обычной
+    out = entities_to_html('q', [E('expandable_blockquote', 0, 1)])
+    assert out == '<blockquote>q</blockquote>'
+
+
+def test_custom_emoji_kept():
+    out = entities_to_html('yo', [E('custom_emoji', 0, 2, custom_emoji_id='5368306519262828048')])
+    assert out == '<emoji id="5368306519262828048">yo</emoji>'
+
+
 def test_plain_text_escaped():
     assert entities_to_html('a<b', []) == 'a&lt;b'
 

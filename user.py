@@ -275,12 +275,20 @@ def _resolve_media(path_base: str):
 
 
 def _to_html(text: str) -> str:
-    """Markdown -> HTML для отправки через Pyrogram."""
+    """Markdown -> HTML для отправки через Pyrogram.
+
+    Текст с маркером HTML_READY_MARK (уже готовый HTML из entities
+    сообщения) возвращается как есть: маркер срезается ЗДЕСЬ, чтобы
+    наружу (в Telegram, в тесты, в plain-фолбэк) он никогда не утекал.
+    """
     if not text:
         return ''
     try:
-        from sqliter import markdown_to_html as _m2h
-        html_text = _m2h(text)
+        from sqliter import HTML_READY_MARK as _MARK, markdown_to_html as _m2h
+        if text.startswith(_MARK):
+            html_text = text[len(_MARK):]
+        else:
+            html_text = _m2h(text)
         # Pyrogram понимает только <spoiler>, а <tg-spoiler> молча выкидывает
         return html_text.replace('<tg-spoiler>', '<spoiler>').replace('</tg-spoiler>', '</spoiler>')
     except Exception:
@@ -301,11 +309,49 @@ def _split(html_text: str, limit: int) -> list:
         return [html_text] if html_text else []
 
 
+async def _try_single_shot(kind: str, chat_id: int, html_text: str,
+                           photo_path: str = None, video_path: str = None,
+                           topic: int = 0):
+    """Попытка отправить всё одним сообщением (текст / фото+подпись /
+    видео+подпись). Возвращает True если ушло, False если Telegram отказал
+    по длине (тогда вызываем _send_long_text). Остальные ошибки — наружу.
+    kind: 'text' | 'photo' | 'video'."""
+    from pyrogram.enums import ParseMode as PyroParseMode
+
+    reply_to = int(topic) if topic else None
+    try:
+        if kind == 'photo':
+            await client.send_photo(chat_id, photo_path, caption=html_text or None,
+                                    parse_mode=PyroParseMode.HTML,
+                                    reply_to_message_id=reply_to)
+        elif kind == 'video':
+            await client.send_video(chat_id, photo_path, caption=html_text or None,
+                                    parse_mode=PyroParseMode.HTML,
+                                    reply_to_message_id=reply_to)
+        else:
+            await client.send_message(chat_id, html_text, parse_mode=PyroParseMode.HTML,
+                                      reply_to_message_id=reply_to)
+        return True
+    except (FloodWait, asyncio.CancelledError):
+        raise
+    except Exception as e:
+        if _is_length_error(e):
+            return False
+        err = str(e).lower()
+        if kind in ('photo', 'video') and any(
+                x in err for x in ['chat_send_photos_forbidden', 'chat_send_media_forbidden',
+                                   'chat_send_videos_forbidden', 'media', 'forbidden']):
+            logger.warning(f"Медиа запрещено в {chat_id}, отправляю текст")
+            return await _try_single_shot('text', chat_id, html_text, topic=topic)
+        raise
+
+
 async def _send_long_text(chat_id: int, html_text: str, topic: int = 0,
                           first_as_caption_of=None):
-    """Длинный HTML — серией сообщений с сохранением форматирования.
-    first_as_caption_of = ('photo'|'video', path): первый кусок — подпись
-    к медиа (режется своим лимитом), остальные — текстом следом."""
+    """Пробуем одним сообщением; только если Telegram отказал по длине —
+    режем на чанки с целым форматированием (цитаты/спойлеры/эмодзи живут).
+    first_as_caption_of = ('photo'|'video', path): подпись к медиа лимитом
+    CAPTION_CHUNK_LIMIT, остальные чанки — текстом следом."""
     from pyrogram.enums import ParseMode as PyroParseMode
 
     reply_to = int(topic) if topic else None
@@ -319,6 +365,9 @@ async def _send_long_text(chat_id: int, html_text: str, topic: int = 0,
         return
     if first_as_caption_of:
         kind, path = first_as_caption_of
+        # 1-в-1: сначала целиком одной подписью; режем только по факту отказа TG
+        if await _try_single_shot(kind, chat_id, html_text, path, topic=topic):
+            return
         chunks = _split(html_text, CAPTION_CHUNK_LIMIT)
         first, rest = chunks[0], chunks[1:]
         try:
@@ -342,6 +391,9 @@ async def _send_long_text(chat_id: int, html_text: str, topic: int = 0,
         for chunk in rest:
             await client.send_message(chat_id, chunk, parse_mode=PyroParseMode.HTML,
                                       reply_to_message_id=reply_to)
+        return
+    # 1-в-1: сначала целиком одним сообщением; режем только по факту отказа TG
+    if await _try_single_shot('text', chat_id, html_text, topic=topic):
         return
     for chunk in _split(html_text, TEXT_CHUNK_LIMIT):
         await client.send_message(chat_id, chunk, parse_mode=PyroParseMode.HTML,
@@ -399,17 +451,44 @@ def _is_parse_error(exc: BaseException) -> bool:
         'message is empty', 'entities', 'caption_too_long', 'message_too_long'))
 
 
+def _is_length_error(exc: BaseException) -> bool:
+    """Telegram отказал именно по длине/числу сущностей — надо резать
+    на чанки, а не падать в plain. parse-ошибки разметки сюда НЕ входят:
+    их чиним, а не обходим нарезкой."""
+    msg = str(exc).lower()
+    return any(s in msg for s in (
+        'caption_too_long', 'message_too_long', 'too many entities',
+        'entities_too_many', 'message is too long', 'caption is too long'))
+
+
 def _is_fatal_error_msg(msg: str) -> bool:
     m = (msg or '').lower().replace(' ', '_')
     return any(s in m for s in FATAL_SEND_ERRORS)
 
 
 def strip_html_tags(s: str) -> str:
-    """Убираем теги — plain-версия для фолбэка, если HTML не парсится."""
+    """Убираем теги — plain-версия для фолбэка, если HTML не парсится.
+
+    Настоящие теги ('<b>') сдираем; экранированный текст ('&lt;x&gt;')
+    — это ВИДИМЫЕ символы, их unescape'им, но НЕ сдираем (иначе 'a <x>'
+    превратится в 'a ' и честный текст потеряется — так и было).
+    """
     if not s:
         return ''
+    # маркер текстовых плейсхолдеров: настоящий '<...>' vs '&lt;...&gt;'
+    _ph: dict[str, str] = {}
+
+    def _hide(m: '_re.Match') -> str:
+        key = f'\x00LT{len(_ph)}\x00'
+        _ph[key] = m.group(0)
+        return key
+
+    s = _re.sub(r'&(lt|gt|amp);(?:(lt|gt|amp);)+', _hide, s)
     s = _re.sub(r'<[^>]+>', '', s)
-    return _html.unescape(s)
+    s = _html.unescape(s)
+    for key, val in _ph.items():
+        s = s.replace(key, _html.unescape(val))
+    return s
 
 
 # Кэш участников для скрытых отметок: chat_id -> (at, [user_id])
@@ -517,7 +596,27 @@ async def _deliver(chat_id: int, text: str,
         if _is_parse_error(e):
             logger.warning(f"HTML не парсится для {chat_id} ({e}), шлю plain-текстом")
             try:
-                plain = strip_html_tags(text) + strip_html_tags(mention)
+                # plain-фолбэк — видимый текст без разметки:
+                # экранированный HTML ('&lt;b&gt;' — пользователь ТАК написал)
+                # сначала разворачиваем в теги и сдираем, иначе останется
+                # мусор 'bhi/b'. Честный '&lt;x&gt;' при этом не трогаем —
+                # strip_html_tags его бережёт, а здешний unescape — нет,
+                # поэтому разворачиваем только парные '&lt;tag&gt;...&lt;/tag&gt;'.
+                import html as _h_fb
+                html_text = _to_html(text)
+                unwrapped = _re.sub(
+                    r'&lt;(/?)(b|i|u|s|spoiler|blockquote|code|pre|a|emoji)\b(.*?)&gt;',
+                    r'<\1\2\3>', html_text)
+                md_plain = _h_fb.unescape(strip_html_tags(unwrapped))
+                if ('**' in md_plain or '__' in md_plain or '||' in md_plain):
+                    try:
+                        from sqliter import markdown_to_html as _m2h_fb
+                        md_plain = strip_html_tags(_m2h_fb(md_plain).replace(
+                            '<tg-spoiler>', '<spoiler>').replace(
+                            '</tg-spoiler>', '</spoiler>'))
+                    except Exception:
+                        pass
+                plain = md_plain + strip_html_tags(mention)
                 if photo_path:
                     await _send_with_fallback(chat_id, plain, photo_path=photo_path, topic=topic)
                 elif video_path:
