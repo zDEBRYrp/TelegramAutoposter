@@ -117,7 +117,7 @@ def entities_to_html(text: str, entities) -> str:
         prev = p
     while stack:  # на всякий случай (точки покрывают все концы, но мало ли)
         out.append(stack.pop()[2])
-    return ''.join(out)
+    return merge_adjacent_same_tags(''.join(out))
 
 
 def message_to_html(text: str | None, entities) -> str:
@@ -210,7 +210,34 @@ def markdown_to_html(text: str) -> str:
     for key, html in placeholders.items():
         text = text.replace(key, html)
 
-    return text
+    return merge_adjacent_same_tags(text)
+
+
+def merge_adjacent_same_tags(text_html: str) -> str:
+    """Склеить соседние одинаковые строчные теги в один.
+
+    Клиент при «||все хэштеги разом||» шлёт ОДНУ сущность-спойлер на весь
+    блок; а markdown `||a|| ||b||` и entities-кусочки дают кучу мелких
+    `<spoiler>a</spoiler><spoiler> </spoiler><spoiler>b</spoiler>` — каждый
+    жрёт лимит ~100 сущностей на сообщение, и хвост молча отрезается
+    сервером. Склейка возвращает вес к клиентскому: N мелких -> 1.
+    Видимый текст и отображение не меняются 1-в-1.
+    Касается только «плоских» парных тегов без атрибутов (spoiler/b/i/u/s/
+    code); blockquote/pre/a/emoji не трогаем (у них границы/атрибуты важны).
+    """
+    if not text_html or '</' not in text_html:
+        return text_html
+    import re as _re
+    # tg-spoiler тоже склеиваем (конвертация в spoiler — позже, в _to_html)
+    for tag in ('spoiler', 'tg-spoiler', 'b', 'i', 'u', 's', 'code'):
+        # между закрывающим и открывающим — только пробелы/переносы:
+        # их переносим ВНУТРЬ одного тега без изменений (текст святой)
+        pat = _re.compile(r'</' + tag + r'>(\s*)<' + tag + r'>')
+        prev = None
+        while prev != text_html:
+            prev = text_html
+            text_html = pat.sub(r'\1', text_html)
+    return text_html
 
 
 _TOKEN_RE = None  # ленивая компиляция ниже

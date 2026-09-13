@@ -124,7 +124,10 @@ def test_long_text_with_quote_keeps_formatting(monkeypatch):
 
     c.send_message = flaky
     monkeypatch.setattr(user, 'client', c)
-    body = '<blockquote>' + ('line\n' * 500) + '</blockquote>\n' + '<spoiler>x</spoiler>' * 95
+    # разрозненные спойлеры разделены текстом — склейке не подлежат,
+    # сущности честно превышают лимит чанка
+    body = ('<blockquote>' + ('line\n' * 500) + '</blockquote>\n'
+            + ''.join(f'<spoiler>x{i}</spoiler> mid{i} ' for i in range(95)))
     stored = '\u200b' + body  # как message_to_html: уже готовый HTML, без markdown
     assert run(user._deliver(-10, stored)) == (True, '')
     assert len(c.calls) > 1
@@ -151,13 +154,24 @@ def test_long_caption_splits_not_plain(monkeypatch, tmp_path):
 
     c.send_photo = flaky_photo
     monkeypatch.setattr(user, 'client', c)
-    body = '<b>head</b>\n' + '<spoiler>tag</spoiler>' * 120
+    # разрозненные спойлеры разделены текстом — склейке не подлежат
+    body = '<b>head</b>\n' + ''.join(f'<spoiler>t{i}</spoiler> x ' for i in range(120))
     stored = '\u200b' + body  # уже готовый HTML
     assert run(user._deliver(-10, stored, photo_path=str(pic))) == (True, '')
     assert len(c.calls) > 1
     assert c.calls[0][0] == 'photo'  # первый — подпись
     assert all(k == 'msg' for k, *_ in c.calls[1:])  # остальные — текст
     assert '<spoiler>' in ''.join((cap or '') for _k, cap in c.calls)
+
+
+def test_merged_spoiler_wall_goes_single_shot(monkeypatch):
+    """Стена соседних спойлеров склеивается — уходит одним сообщением."""
+    c = CountClient()
+    monkeypatch.setattr(user, 'client', c)
+    body = '\u200b' + '<spoiler>#t</spoiler>' * 110
+    assert run(user._deliver(-10, body)) == (True, '')
+    assert len(c.calls) == 1  # склейка: 110 сущностей -> 1
+    assert c.calls[0][1].count('<spoiler>') == 1
 
 
 def test_single_shot_first_no_premature_split(monkeypatch):

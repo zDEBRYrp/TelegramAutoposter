@@ -1,5 +1,5 @@
 """Тесты конвертера Markdown -> HTML (sqliter.markdown_to_html)."""
-from sqliter import markdown_to_html
+from sqliter import markdown_to_html, merge_adjacent_same_tags
 
 
 def test_bold():
@@ -81,3 +81,35 @@ def test_link_mention_normalized():
 
 def test_link_non_url_left_as_is():
     assert markdown_to_html('[t](notaurl)') == '[t](notaurl)'
+
+
+def test_adjacent_spoilers_merged():
+    # ||a|| ||b|| — один спойлер на всё, как шлёт клиент (1 сущность, не 3)
+    out = markdown_to_html('||a|| ||b||')
+    assert out == '<tg-spoiler>a b</tg-spoiler>'
+
+
+def test_adjacent_bold_merged():
+    assert markdown_to_html('**a** **b**') == '<b>a b</b>'
+
+
+def test_merge_keeps_visible_text():
+    import re
+    strip = lambda s: re.sub(r'<[^>]+>', '', s)
+    src = '<spoiler>#a</spoiler><spoiler> </spoiler><spoiler>#b</spoiler>'
+    assert strip(merge_adjacent_same_tags(src)) == strip(src)
+    assert merge_adjacent_same_tags(src) == '<spoiler>#a #b</spoiler>'
+
+
+def test_merge_does_not_touch_links_or_quotes():
+    src = '<a href="https://x.y">a</a> <a href="https://x.y">b</a>'
+    assert merge_adjacent_same_tags(src) == src
+    src = '<blockquote>a</blockquote>\n<blockquote>b</blockquote>'
+    assert merge_adjacent_same_tags(src) == src
+
+
+def test_merge_multiline_spoiler_wall_single_entity():
+    body = '<spoiler>#t</spoiler>' * 110
+    merged = merge_adjacent_same_tags(body.replace('</spoiler><spoiler>', '</spoiler> <spoiler>'))
+    from sqliter import _count_entity_opens
+    assert _count_entity_opens(merged) == 1

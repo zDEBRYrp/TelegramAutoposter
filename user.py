@@ -284,13 +284,17 @@ def _to_html(text: str) -> str:
     if not text:
         return ''
     try:
-        from sqliter import HTML_READY_MARK as _MARK, markdown_to_html as _m2h
+        from sqliter import (HTML_READY_MARK as _MARK, markdown_to_html as _m2h,
+                             merge_adjacent_same_tags as _merge)
         if text.startswith(_MARK):
             html_text = text[len(_MARK):]
         else:
             html_text = _m2h(text)
         # Pyrogram понимает только <spoiler>, а <tg-spoiler> молча выкидывает
-        return html_text.replace('<tg-spoiler>', '<spoiler>').replace('</tg-spoiler>', '</spoiler>')
+        html_text = html_text.replace('<tg-spoiler>', '<spoiler>').replace(
+            '</tg-spoiler>', '</spoiler>')
+        # финальная склейка соседних спойлеров: вес сущностей как у клиента
+        return _merge(html_text)
     except Exception:
         return text
 
