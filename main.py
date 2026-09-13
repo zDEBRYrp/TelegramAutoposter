@@ -701,6 +701,52 @@ def _fmt_delay(sec: int) -> str:
     return f'{hours} ч {mins} мин' if mins else f'{hours} ч'
 
 
+def _chat_title(chat_id: int) -> str:
+    """Название чата из последнего ростера (пусто если неизвестно)."""
+    try:
+        return _chat_names().get(int(chat_id), '')
+    except Exception:
+        return ''
+
+
+def _chat_names() -> dict:
+    """id -> title из последнего ростера (без сетевых вызовов)."""
+    try:
+        data = user._chats_cache.get('data') or []
+        return {int(c.get('id')): str(c.get('title') or '') for c in data
+                if c.get('id') is not None}
+    except Exception:
+        return {}
+
+
+def _chat_usernames() -> dict:
+    """id -> username из последнего ростера (без сетевых вызовов)."""
+    try:
+        data = user._chats_cache.get('data') or []
+        return {int(c.get('id')): str(c.get('username') or '') for c in data
+                if c.get('id') is not None}
+    except Exception:
+        return {}
+
+
+def _chat_link(chat_id: int) -> str:
+    """Кликабельное название чата: <a href> если есть username, иначе жирный
+    текст + ID. Никогда не падает — fallback всегда есть."""
+    try:
+        cid = int(chat_id)
+    except (TypeError, ValueError):
+        return html.escape(str(chat_id))
+    names = _chat_names()
+    title = (names.get(cid) or '').strip()
+    uname = (_chat_usernames().get(cid) or '').strip().lstrip('@')
+    if not title:
+        return f'<b>Чат {cid}</b>'
+    safe = html.escape(title)
+    if uname:
+        return f'<a href="https://t.me/{html.escape(uname)}">{safe}</a>'
+    return f'<b>{safe}</b> ({cid})'
+
+
 def format_chat_info(chat_id: int) -> str:
     """Красивая карточка чата для EDIT_CHAT / TOGGLE_SPAM_SETTINGS."""
     spam_status = db.get_channel_spam_status(chat_id)
@@ -770,7 +816,7 @@ def format_chat_info(chat_id: int) -> str:
                          f'но не чаще минимума {timeout_val} мин.')
         else:
             slow_line = f'\n🐢 Слоумод: {slow}с{checked} (впритык выкл)'
-    return (f'💬 <b>Чат {chat_id}</b>\n'
+    return (f'💬 {_chat_link(chat_id)}\n'
             f'{"✅ Рассылка включена" if spam_status == 1 else "❌ Рассылка выключена"}\n'
             f'⏱ Интервал: {timeout_val} мин.{slow_line}\n'
             + (f'🧵 Тема: {topic_desc}\n' if is_forum else '') +
@@ -1677,7 +1723,8 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         chat_id = int(data.split(':')[1])
         try:
             db.add_channel(chat_id)
-            await c.message.edit_text(f'Чат {chat_id} успешно добавлен!')
+            await c.message.edit_text(f'{_chat_link(chat_id)} успешно добавлен!',
+                                      parse_mode=ParseMode.HTML)
             await c.answer()
         except Exception as e:
             await c.answer(f'Ошибка: {e}', show_alert=True)
@@ -1700,16 +1747,18 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         chat_id = int(data.split(':')[1])
         await state.set_data({'chat_id': chat_id, 'prompt_id': c.message.message_id})
         cur = db.get_channel_timeout(chat_id)
-        await c.message.edit_text(f'Текущий минимум чата: {cur} мин.\nВведи новый минимум (в минутах):',
-                                  reply_markup=cancel_kb())
+        await c.message.edit_text(f'{_chat_link(chat_id)}\nТекущий минимум: {cur} мин.\n'
+                                  f'Введи новый минимум (в минутах):',
+                                  reply_markup=cancel_kb(), parse_mode=ParseMode.HTML)
         await state.set_state(channel_time.timeout)
         await c.answer()
 
     elif data.startswith('ADD_ADDITIONAL:'):
         chat_id = int(data.split(':')[1])
         await state.set_data({'chat_id': chat_id, 'prompt_id': c.message.message_id})
-        await c.message.edit_text('Введите дополнительный текст для чата:' + MARKDOWN_HINT,
-                                  reply_markup=cancel_kb())
+        await c.message.edit_text(f'Введите дополнительный текст для {_chat_link(chat_id)}:'
+                                  + MARKDOWN_HINT,
+                                  reply_markup=cancel_kb(), parse_mode=ParseMode.HTML)
         await state.set_state(addition.id)
         await c.answer()
 
@@ -1816,7 +1865,8 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
         # убираем пустые строки
         keyboard.inline_keyboard = [row for row in keyboard.inline_keyboard if row]
         status = '✅ Пост установлен' if has_post else '❌ Пост не установлен'
-        await c.message.edit_text(f'📝 Пост чата {chat_id}\n{status}:', reply_markup=keyboard)
+        await c.message.edit_text(f'📝 Пост {_chat_link(chat_id)}\n{status}:', reply_markup=keyboard,
+                                  parse_mode=ParseMode.HTML)
         await c.answer()
 
     elif data.startswith('VIEW_CHANNEL_POST:'):
@@ -1867,38 +1917,42 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
     elif data.startswith('CHANNEL_EDIT_TEXT:'):
         chat_id = int(data.split(':')[1])
         await state.set_data({'chat_id': chat_id, 'prompt_id': c.message.message_id})
-        await c.message.edit_text('Введите текст поста чата:' + MARKDOWN_HINT,
-                                  reply_markup=cancel_kb())
+        await c.message.edit_text(f'Введите текст поста {_chat_link(chat_id)}:' + MARKDOWN_HINT,
+                                  reply_markup=cancel_kb(), parse_mode=ParseMode.HTML)
         await state.set_state(channel_post_text.text)
         await c.answer()
 
     elif data.startswith('CHANNEL_EDIT_PHOTO:'):
         chat_id = int(data.split(':')[1])
         await state.set_data({'chat_id': chat_id, 'prompt_id': c.message.message_id})
-        await c.message.edit_text('Отправь фото для поста чата:', reply_markup=cancel_kb())
+        await c.message.edit_text(f'Отправь фото для поста {_chat_link(chat_id)}:',
+                                  reply_markup=cancel_kb(), parse_mode=ParseMode.HTML)
         await state.set_state(channel_post_photo.photo)
         await c.answer()
 
     elif data.startswith('CHANNEL_EDIT_VIDEO:'):
         chat_id = int(data.split(':')[1])
         await state.set_data({'chat_id': chat_id, 'prompt_id': c.message.message_id})
-        await c.message.edit_text('Отправь видео для поста чата:', reply_markup=cancel_kb())
+        await c.message.edit_text(f'Отправь видео для поста {_chat_link(chat_id)}:',
+                                  reply_markup=cancel_kb(), parse_mode=ParseMode.HTML)
         await state.set_state(channel_post_video.video)
         await c.answer()
 
     elif data.startswith('CHANNEL_EDIT_FORWARD:'):
         chat_id = int(data.split(':')[1])
         await state.set_data({'chat_id': chat_id, 'prompt_id': c.message.message_id})
-        await c.message.edit_text('📨 Перешли сюда пост из канала — этот чат будет получать его как есть.',
-                                  reply_markup=cancel_kb())
+        await c.message.edit_text(f'📨 Перешли сюда пост из канала — {_chat_link(chat_id)} '
+                                  f'будет получать его как есть.',
+                                  reply_markup=cancel_kb(), parse_mode=ParseMode.HTML)
         await state.set_state(channel_post_forward.forward)
         await c.answer()
 
     elif data.startswith('CHANNEL_CLEAR:'):
         chat_id = int(data.split(':')[1])
         db.clear_channel_post(chat_id)
-        await c.message.edit_text(f'🗑 Пост чата {chat_id} очищен.',
-                                  reply_markup=back_to_channel_post_kb(chat_id))
+        await c.message.edit_text(f'🗑 Пост {_chat_link(chat_id)} очищен.',
+                                  reply_markup=back_to_channel_post_kb(chat_id),
+                                  parse_mode=ParseMode.HTML)
         await c.answer()
 
     elif data == 'EDIT_TEXT':

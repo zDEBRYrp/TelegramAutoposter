@@ -146,7 +146,8 @@ async def get_chats(force: bool = False) -> List[Dict[str, Any]]:
                                     enums.ChatType.GROUP):
                 chat_list.append({
                     'title': dialog.chat.title,
-                    'id': dialog.chat.id
+                    'id': dialog.chat.id,
+                    'username': getattr(dialog.chat, 'username', None) or '',
                 })
     except AuthKeyUnregistered:
         await _delete_session()

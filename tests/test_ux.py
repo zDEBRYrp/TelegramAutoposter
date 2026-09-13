@@ -53,6 +53,50 @@ def test_format_chat_info_escapes_html():
     assert '&lt;script&gt;' in info
 
 
+def test_chat_link_clickable_with_username():
+    main.user._chats_cache['data'] = [{'id': -5, 'title': 'News', 'username': 'newschannel'}]
+    try:
+        out = main._chat_link(-5)
+    finally:
+        main.user._chats_cache['data'] = []
+    assert out == '<a href="https://t.me/newschannel">News</a>'
+
+
+def test_chat_link_fallback_without_roster():
+    main.user._chats_cache['data'] = []
+    assert main._chat_link(-7) == '<b>Чат -7</b>'
+    main.user._chats_cache['data'] = [{'id': -8, 'title': 'No user'}]
+    try:
+        out = main._chat_link(-8)
+    finally:
+        main.user._chats_cache['data'] = []
+    assert out == '<b>No user</b> (-8)'
+
+
+def test_chat_link_escapes_title():
+    main.user._chats_cache['data'] = [{'id': -9, 'title': '<x>', 'username': 'u'}]
+    try:
+        out = main._chat_link(-9)
+    finally:
+        main.user._chats_cache['data'] = []
+    assert '<x>' not in out and '&lt;x&gt;' in out
+
+
+def test_format_chat_info_shows_chat_name():
+    from sqliter import DBConnection
+    db = DBConnection(db_path=':memory:')
+    db.add_channel(-5)
+    old = main.db
+    main.db = db
+    main.user._chats_cache['data'] = [{'id': -5, 'title': 'My Chat', 'username': ''}]
+    try:
+        info = main.format_chat_info(-5)
+    finally:
+        main.db = old
+        main.user._chats_cache['data'] = []
+    assert 'My Chat' in info and '-5' in info
+
+
 def test_spam_running_keyboard_has_stop():
     kb = main.spam_running_keyboard()
     texts = [b.text for row in kb.keyboard for b in row]

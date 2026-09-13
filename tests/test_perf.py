@@ -8,9 +8,9 @@ import main
 from pyrogram import enums
 
 
-def _dlg(cid, title='C'):
+def _dlg(cid, title='C', username=''):
     return SimpleNamespace(chat=SimpleNamespace(
-        type=enums.ChatType.SUPERGROUP, title=title, id=cid))
+        type=enums.ChatType.SUPERGROUP, title=title, id=cid, username=username))
 
 
 class _StubClient:
@@ -37,7 +37,7 @@ def test_get_chats_cached(monkeypatch):
     try:
         first = asyncio.run(user.get_chats())
         second = asyncio.run(user.get_chats())
-        assert first == [{'title': 'C', 'id': -1}]
+        assert first == [{'title': 'C', 'id': -1, 'username': ''}]
         assert stub.calls == 1  # второй раз — из кэша, без сети
         assert first is not second  # копии, мутации не портят кэш
     finally:
