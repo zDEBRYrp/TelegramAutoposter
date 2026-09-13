@@ -108,4 +108,35 @@ def test_log_media_long_stays_two(monkeypatch, tmp_path):
             return 1, '-100999'
 
     run(user._log_send(DB(), {'id': -1, 'title': 'C'}, 'x' * 2000, photo_path=str(pic)))
-    assert len(c.calls) == 2  # не влезло в подпись — медиа + цитата
+    assert len(c.calls) >= 2  # не влезло в подпись — медиа + цитата чанками
+
+
+def test_long_text_with_quote_keeps_formatting(monkeypatch):
+    """Длинный текст: цитата и спойлеры не теряются при нарезке."""
+    from sqliter import markdown_to_html
+    c = CountClient()
+    monkeypatch.setattr(user, 'client', c)
+    body = '<blockquote>' + ('line\n' * 500) + '</blockquote>\n' + '<spoiler>x</spoiler>' * 95
+    stored = '\u200b' + body  # как message_to_html: уже готовый HTML, без markdown
+    assert run(user._deliver(-10, stored)) == (True, '')
+    assert len(c.calls) > 1
+    joined = ''.join(t for _k, t in c.calls)
+    assert joined.count('<blockquote>') == joined.count('</blockquote>')
+    assert joined.count('<spoiler>') == joined.count('</spoiler>')
+    import re
+    assert re.sub(r'<[^>]+>', '', joined) == re.sub(r'<[^>]+>', '', body)
+
+
+def test_long_caption_splits_not_plain(monkeypatch, tmp_path):
+    """Длинная подпись: первый кусок — подпись к фото, остальные — текст следом."""
+    pic = tmp_path / 'p.jpg'
+    pic.write_bytes(b'x')
+    c = CountClient()
+    monkeypatch.setattr(user, 'client', c)
+    body = '<b>head</b>\n' + '<spoiler>tag</spoiler>' * 120
+    stored = '\u200b' + body  # уже готовый HTML
+    assert run(user._deliver(-10, stored, photo_path=str(pic))) == (True, '')
+    assert len(c.calls) > 1
+    assert c.calls[0][0] == 'photo'  # первый — подпись
+    assert all(k == 'msg' for k, *_ in c.calls[1:])  # остальные — текст
+    assert '<spoiler>' in ''.join((cap or '') for _k, cap in c.calls)

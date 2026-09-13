@@ -10,7 +10,9 @@ def test_split_html_long_splits_by_lines():
     long = '\n'.join(f'line{i}' for i in range(500))
     chunks = main.split_html(long, limit=100)
     assert len(chunks) > 1
-    assert '\n'.join(chunks) == long
+    import re
+    strip = lambda s: re.sub(r'<[^>]+>', '', s)
+    assert strip(''.join(chunks)) == long  # текст 1-в-1 (теги-склейки не в счёт)
 
 
 def test_short_truncates():

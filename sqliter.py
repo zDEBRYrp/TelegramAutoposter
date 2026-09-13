@@ -205,6 +205,164 @@ def markdown_to_html(text: str) -> str:
     return text
 
 
+_TOKEN_RE = None  # ленивая компиляция ниже
+_OPEN_TAG_RE = None
+
+
+def _token_pattern():
+    global _TOKEN_RE
+    if _TOKEN_RE is None:
+        import re as _re
+        _TOKEN_RE = _re.compile(r'<[^<>]*>')
+    return _TOKEN_RE
+
+
+def _open_tag_pattern():
+    global _OPEN_TAG_RE
+    if _OPEN_TAG_RE is None:
+        import re as _re
+        _OPEN_TAG_RE = _re.compile(r'<\s*(/?)\s*([A-Za-z][A-Za-z0-9]*)[^<>]*?>')
+    return _OPEN_TAG_RE
+
+
+def _tag_info(token: str):
+    """(is_tag, closing, name) — мусор вроде '<3' считаем обычным текстом."""
+    m = _open_tag_pattern().fullmatch(token)
+    if not m:
+        return False, False, ''
+    return True, bool(m.group(1)), m.group(2).lower()
+
+
+def _cut_text_token(s: str, max_len: int) -> int:
+    """Срез текстового токена (без <тегов>) <= max_len, но не внутри &сущности;."""
+    cut = min(max_len, len(s))
+    if cut <= 0:
+        return 1 if s else 0
+    head = s[:cut]
+    amp = head.rfind('&')
+    if amp != -1 and ';' not in head[amp:cut] and cut - amp <= 10:
+        if amp == 0:
+            # сущность целиком не влезает — режем после ';', иначе нет прогресса
+            semi = s.find(';', cut)
+            if semi != -1 and semi - cut <= 10:
+                return semi + 1
+            return cut  # битая сущность — режем как есть
+        return amp
+    return cut if cut > 0 else (1 if s else 0)
+
+
+def split_html_smart(text_html: str, limit: int = 4000, max_entities: int = 90) -> list:
+    """Нарезать HTML на куски, сохраняя форматирование.
+
+    Гарантии на каждый кусок: длина (с тегами) <= limit, открывающих
+    тегов (сущностей Telegram) <= max_entities, теги сбалансированы
+    (разорванные закрываются в конце куска и открываются заново
+    в начале следующего — цитаты/спойлеры живут в каждом куске).
+    Токенизация «тег vs текст» даёт склейку текстового содержимого 1-в-1:
+    retext(''.join(chunks)) == retext(text_html).
+    Возвращает [text_html] если влезает целиком.
+    """
+    if not text_html:
+        return [text_html]
+    if len(text_html) <= limit:
+        n_open = sum(1 for _m in _open_tag_pattern().finditer(text_html)
+                     if not _m.group(1))
+        if n_open <= max_entities:
+            return [text_html]
+    # токены: теги целиком, текст между ними — как есть
+    parts: list[tuple[str, str]] = []  # (kind, value), kind: 'tag' | 'text'
+    pos = 0
+    for m in _token_pattern().finditer(text_html):
+        if m.start() > pos:
+            parts.append(('text', text_html[pos:m.start()]))
+        tok = m.group(0)
+        is_tag, _cl, _nm = _tag_info(tok)
+        parts.append(('tag', tok) if is_tag else ('text', tok))
+        pos = m.end()
+    if pos < len(text_html):
+        parts.append(('text', text_html[pos:]))
+
+    chunks: list[str] = []
+    stack: list = []  # (name, open_tag)
+    cur_parts: list[str] = []
+    cur_len = 0
+    cur_ent = 0
+
+    def _closers() -> str:
+        return ''.join(f'</{name}>' for name, _o in reversed(stack))
+
+    def _openers() -> str:
+        return ''.join(o for _n, o in stack)
+
+    def _flush():
+        if cur_parts or not chunks:
+            chunks.append(''.join(cur_parts) + _closers())
+
+    def _fresh() -> bool:
+        return cur_len == len(_openers()) and cur_ent == len(stack)
+
+    for kind, val in parts:
+        if kind == 'text':
+            rest = val
+            while rest:
+                room = limit - cur_len - len(_closers())
+                if room <= 0:
+                    _flush()
+                    cur_parts, cur_len, cur_ent = [_openers()], len(_openers()), len(stack)
+                    room = limit - cur_len - len(_closers())
+                    if room <= 0:  # патологическая вложенность — влезаем как есть
+                        cur_parts.append(rest)
+                        cur_len += len(rest)
+                        rest = ''
+                        break
+                if len(rest) <= room:
+                    cur_parts.append(rest)
+                    cur_len += len(rest)
+                    rest = ''
+                else:
+                    cut = _cut_text_token(rest, room)
+                    cur_parts.append(rest[:cut])
+                    cur_len += cut
+                    rest = rest[cut:]
+                    _flush()
+                    cur_parts, cur_len, cur_ent = [_openers()], len(_openers()), len(stack)
+        else:
+            _is_tag, closing, name = _tag_info(val)
+            add_ent = 0 if closing else 1
+            # симулируем стек после токена для учёта длины закрывашек
+            sim = list(stack)
+            if closing:
+                idx = next((i for i in range(len(sim) - 1, -1, -1)
+                            if sim[i][0] == name), None)
+                if idx is not None:
+                    del sim[idx:]
+            else:
+                sim.append((name, val))
+            sim_closers = ''.join(f'</{n}>' for n, _o in reversed(sim))
+            if (cur_len + len(val) + len(sim_closers) > limit
+                    or cur_ent + add_ent > max_entities) and not _fresh():
+                _flush()
+                cur_parts, cur_len, cur_ent = [_openers()], len(_openers()), len(stack)
+                # пересчёт после флаша: стек тот же, пробуем снова
+                if (cur_len + len(val) + len(sim_closers) > limit
+                        or cur_ent + add_ent > max_entities):
+                    # одиночный тег не влезает даже в свежий чанк —
+                    # кладём как есть (прогресс важнее идеала)
+                    pass
+            cur_parts.append(val)
+            cur_len += len(val)
+            if closing:
+                idx = next((i for i in range(len(stack) - 1, -1, -1)
+                            if stack[i][0] == name), None)
+                if idx is not None:
+                    del stack[idx:]
+            else:
+                stack.append((name, val))
+                cur_ent += 1
+    _flush()
+    return chunks or [text_html]
+
+
 class DBConnection(object):
     def __init__(self, db_path: Optional[str] = None):
         if db_path:

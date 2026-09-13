@@ -287,11 +287,74 @@ def _to_html(text: str) -> str:
         return text
 
 
+TEXT_CHUNK_LIMIT = 3900  # запас до 4096: чанки с тегами обязаны влезать
+CAPTION_CHUNK_LIMIT = 900  # запас до 1024 на подпись с тегами
+MAX_ENTITIES_PER_MSG = 90  # запас до ~100 сущностей Telegram на сообщение
+
+
+def _split(html_text: str, limit: int) -> list:
+    """Умная нарезка HTML с балансом тегов (см. sqliter.split_html_smart)."""
+    try:
+        from sqliter import split_html_smart as _split_smart
+        return _split_smart(html_text, limit, MAX_ENTITIES_PER_MSG)
+    except Exception:
+        return [html_text] if html_text else []
+
+
+async def _send_long_text(chat_id: int, html_text: str, topic: int = 0,
+                          first_as_caption_of=None):
+    """Длинный HTML — серией сообщений с сохранением форматирования.
+    first_as_caption_of = ('photo'|'video', path): первый кусок — подпись
+    к медиа (режется своим лимитом), остальные — текстом следом."""
+    from pyrogram.enums import ParseMode as PyroParseMode
+
+    reply_to = int(topic) if topic else None
+    if not html_text:
+        if first_as_caption_of:
+            kind, path = first_as_caption_of
+            if kind == 'video':
+                await client.send_video(chat_id, path, reply_to_message_id=reply_to)
+            else:
+                await client.send_photo(chat_id, path, reply_to_message_id=reply_to)
+        return
+    if first_as_caption_of:
+        kind, path = first_as_caption_of
+        chunks = _split(html_text, CAPTION_CHUNK_LIMIT)
+        first, rest = chunks[0], chunks[1:]
+        try:
+            if kind == 'video':
+                await client.send_video(chat_id, path, caption=first or None,
+                                        parse_mode=PyroParseMode.HTML,
+                                        reply_to_message_id=reply_to)
+            else:
+                await client.send_photo(chat_id, path, caption=first or None,
+                                        parse_mode=PyroParseMode.HTML,
+                                        reply_to_message_id=reply_to)
+        except Exception as e:
+            err = str(e).lower()
+            if any(x in err for x in ['chat_send_photos_forbidden', 'chat_send_media_forbidden',
+                                      'chat_send_videos_forbidden', 'media', 'forbidden']):
+                logger.warning(f"Медиа запрещено в {chat_id}, отправляю текст")
+                await client.send_message(chat_id, first, parse_mode=PyroParseMode.HTML,
+                                          reply_to_message_id=reply_to)
+            else:
+                raise
+        for chunk in rest:
+            await client.send_message(chat_id, chunk, parse_mode=PyroParseMode.HTML,
+                                      reply_to_message_id=reply_to)
+        return
+    for chunk in _split(html_text, TEXT_CHUNK_LIMIT):
+        await client.send_message(chat_id, chunk, parse_mode=PyroParseMode.HTML,
+                                  reply_to_message_id=reply_to)
+
+
 async def _send_with_fallback(chat_id: int, text: str, photo_path: str = None,
                               video_path: str = None, topic: int = 0, mention: str = ''):
     """Отправить медиа с fallback на текст если чат не поддерживает.
     topic = id темы форума (0 = General): шлём ответом в топик.
-    mention = готовый HTML-хвост со скрытыми отметками (уже после конвертации)."""
+    mention = готовый HTML-хвост со скрытыми отметками (уже после конвертации).
+    Длинные тексты режутся на чанки с целым форматированием (цитаты/спойлеры
+    не теряются), а не падают в plain через parse-ошибку."""
     from pyrogram.enums import ParseMode as PyroParseMode
 
     html_text = ((_to_html(text) if text else '') + (mention or ''))
@@ -300,50 +363,25 @@ async def _send_with_fallback(chat_id: int, text: str, photo_path: str = None,
     if photo_path:
         found = _resolve_media(photo_path) or (photo_path if os.path.exists(photo_path) else None)
         if found:
-            try:
-                await client.send_photo(chat_id, found, caption=html_text or None,
-                                        parse_mode=PyroParseMode.HTML,
-                                        reply_to_message_id=reply_to)
-                return
-            except Exception as e:
-                err = str(e).lower()
-                if any(x in err for x in ['chat_send_photos_forbidden', 'chat_send_media_forbidden', 'media', 'forbidden']):
-                    logger.warning(f"Фото запрещено в {chat_id}, отправляю текст")
-                    if html_text:
-                        await client.send_message(chat_id, html_text, parse_mode=PyroParseMode.HTML,
-                                                  reply_to_message_id=reply_to)
-                    return
-                raise
+            await _send_long_text(chat_id, html_text, topic,
+                                  first_as_caption_of=('photo', found))
+            return
         if html_text:
-            await client.send_message(chat_id, html_text, parse_mode=PyroParseMode.HTML,
-                                      reply_to_message_id=reply_to)
+            await _send_long_text(chat_id, html_text, topic)
         return
 
     if video_path:
         found = _resolve_media(video_path) or (video_path if os.path.exists(video_path) else None)
         if found:
-            try:
-                await client.send_video(chat_id, found, caption=html_text or None,
-                                        parse_mode=PyroParseMode.HTML,
-                                        reply_to_message_id=reply_to)
-                return
-            except Exception as e:
-                err = str(e).lower()
-                if any(x in err for x in ['chat_send_videos_forbidden', 'chat_send_media_forbidden', 'media', 'forbidden']):
-                    logger.warning(f"Видео запрещено в {chat_id}, отправляю текст")
-                    if html_text:
-                        await client.send_message(chat_id, html_text, parse_mode=PyroParseMode.HTML,
-                                                  reply_to_message_id=reply_to)
-                    return
-                raise
+            await _send_long_text(chat_id, html_text, topic,
+                                  first_as_caption_of=('video', found))
+            return
         if html_text:
-            await client.send_message(chat_id, html_text, parse_mode=PyroParseMode.HTML,
-                                      reply_to_message_id=reply_to)
+            await _send_long_text(chat_id, html_text, topic)
         return
 
     if html_text:
-        await client.send_message(chat_id, html_text, parse_mode=PyroParseMode.HTML,
-                                  reply_to_message_id=reply_to)
+        await _send_long_text(chat_id, html_text, topic)
 
 
 FATAL_SEND_ERRORS = (
@@ -552,7 +590,8 @@ async def _log_send(db, chat: Dict[str, Any], text: str,
 
     async def _safe_send_text(html_msg: str):
         try:
-            await client.send_message(dest, html_msg, parse_mode=PyroParseMode.HTML)
+            for chunk in _split(html_msg, TEXT_CHUNK_LIMIT):
+                await client.send_message(dest, chunk, parse_mode=PyroParseMode.HTML)
         except (FloodWait, asyncio.CancelledError):
             raise
         except Exception as e:
@@ -574,31 +613,34 @@ async def _log_send(db, chat: Dict[str, Any], text: str,
         is_video = bool(media_path)
 
     async def _safe_send_media(caption_html: str):
-        try:
-            if is_video:
-                await client.send_video(dest, media_path, caption=caption_html,
-                                        parse_mode=PyroParseMode.HTML)
-            else:
-                await client.send_photo(dest, media_path, caption=caption_html,
-                                        parse_mode=PyroParseMode.HTML)
-        except (FloodWait, asyncio.CancelledError):
-            raise
-        except Exception as e:
-            if _is_parse_error(e):
-                plain_cap = strip_html_tags(caption_html) or None
-                try:
-                    if is_video:
-                        await client.send_video(dest, media_path, caption=plain_cap)
-                    else:
-                        await client.send_photo(dest, media_path, caption=plain_cap)
-                except (FloodWait, asyncio.CancelledError):
-                    raise
-                except Exception as e2:
-                    logger.warning(f"Лог-медиа не ушло в {dest}: {e2}")
-                    raise RuntimeError(str(e2))
-            else:
-                logger.warning(f"Лог-медиа не ушло в {dest}: {e}")
-                raise RuntimeError(str(e))
+        """Подпись тоже режется умно (чанки <= 900): длинная шапка лога
+        не падает в parse-ошибку целиком."""
+        for cap in _split(caption_html, CAPTION_CHUNK_LIMIT):
+            try:
+                if is_video:
+                    await client.send_video(dest, media_path, caption=cap,
+                                            parse_mode=PyroParseMode.HTML)
+                else:
+                    await client.send_photo(dest, media_path, caption=cap,
+                                            parse_mode=PyroParseMode.HTML)
+            except (FloodWait, asyncio.CancelledError):
+                raise
+            except Exception as e:
+                if _is_parse_error(e):
+                    plain_cap = strip_html_tags(cap) or None
+                    try:
+                        if is_video:
+                            await client.send_video(dest, media_path, caption=plain_cap)
+                        else:
+                            await client.send_photo(dest, media_path, caption=plain_cap)
+                    except (FloodWait, asyncio.CancelledError):
+                        raise
+                    except Exception as e2:
+                        logger.warning(f"Лог-медиа не ушло в {dest}: {e2}")
+                        raise RuntimeError(str(e2))
+                else:
+                    logger.warning(f"Лог-медиа не ушло в {dest}: {e}")
+                    raise RuntimeError(str(e))
 
     try:
         if fwd is not None:

@@ -23,7 +23,7 @@ import config
 import user
 import updater
 
-from sqliter import DBConnection, markdown_to_html, message_to_html
+from sqliter import DBConnection, markdown_to_html, message_to_html, split_html_smart
 
 router = Router()
 from aiogram.client.default import DefaultBotProperties
@@ -291,31 +291,37 @@ TEXT_LIMIT = 4000  # запас до лимита 4096
 
 
 def split_html(text_html: str, limit: int = TEXT_LIMIT) -> list[str]:
-    """Нарезать длинный HTML на куски, по возможности по переносам строк."""
-    if len(text_html) <= limit:
-        return [text_html]
-    chunks, cur = [], ''
-    for line in text_html.split('\n'):
-        if len(cur) + len(line) + 1 > limit and cur:
+    """Нарезать длинный HTML на куски с целым форматированием (теги
+    балансируются: цитаты/спойлеры не рвутся, сущности <= 90 на кусок)."""
+    try:
+        return split_html_smart(text_html, limit)
+    except Exception:
+        if not text_html or len(text_html) <= limit:
+            return [text_html]
+        chunks, cur = [], ''
+        for line in text_html.split('\n'):
+            if len(cur) + len(line) + 1 > limit and cur:
+                chunks.append(cur)
+                cur = ''
+            cur = f'{cur}\n{line}' if cur else line
+        if cur:
             chunks.append(cur)
-            cur = ''
-        cur = f'{cur}\n{line}' if cur else line
-    if cur:
-        chunks.append(cur)
-    return chunks or [text_html]
+        return chunks or [text_html]
 
 
 async def send_post_preview(chat_id: int, media_path: str | None, text_html: str, is_video: bool = False):
-    """Предпросмотр поста: длинную подпись шлёт отдельным сообщением,
-    чтобы не упереться в лимит caption 1024."""
+    """Предпросмотр поста: подпись режется своим лимитом (900), остальное —
+    текстом следом; форматирование в кусках целое (см. split_html)."""
     if media_path:
         media = FSInputFile(media_path)
         if text_html and len(text_html) > CAPTION_LIMIT:
+            chunks = split_html(text_html, CAPTION_LIMIT)
+            first, rest = chunks[0], chunks[1:]
             if is_video:
-                await bot.send_video(chat_id, media)
+                await bot.send_video(chat_id, media, caption=first or None, parse_mode=ParseMode.HTML)
             else:
-                await bot.send_photo(chat_id, media)
-            for chunk in split_html(text_html):
+                await bot.send_photo(chat_id, media, caption=first or None, parse_mode=ParseMode.HTML)
+            for chunk in split_html('\n'.join(rest)) if rest else []:
                 await bot.send_message(chat_id, chunk, parse_mode=ParseMode.HTML)
         elif is_video:
             await bot.send_video(chat_id, media, caption=text_html or None, parse_mode=ParseMode.HTML)
