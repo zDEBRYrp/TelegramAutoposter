@@ -169,23 +169,8 @@ def markdown_to_html(text: str) -> str:
                   lambda m: _store(f'<code>{m.group(1)}</code>'),
                   text)
 
-    # Цитаты "> строка" (после экранирования это "&gt;") — группируем подряд
-    lines = text.split('\n')
-    out_lines: list[str] = []
-    quote_buf: list[str] = []
-    for line in lines:
-        if line.startswith('&gt; ') or line == '&gt;':
-            quote_buf.append(line[5:] if line.startswith('&gt; ') else '')
-        else:
-            if quote_buf:
-                out_lines.append('<blockquote>' + '\n'.join(quote_buf) + '</blockquote>')
-                quote_buf = []
-            out_lines.append(line)
-    if quote_buf:
-        out_lines.append('<blockquote>' + '\n'.join(quote_buf) + '</blockquote>')
-    text = '\n'.join(out_lines)
-
-    # Жирный **text** или __text__
+    # Жирный **text** или __text__ — ДО цитат: форматирование внутри
+    # цитаты должно сработать, а '>' внутри '**a > b**' — не цитата
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
     text = re.sub(r'__(.+?)__', r'<b>\1</b>', text, flags=re.DOTALL)
 
@@ -198,6 +183,30 @@ def markdown_to_html(text: str) -> str:
 
     # Спойлер ||text||
     text = re.sub(r'\|\|(.+?)\|\|', r'<tg-spoiler>\1</tg-spoiler>', text, flags=re.DOTALL)
+
+    # Цитаты "> строка" (после экранирования это "&gt;") — группируем подряд.
+    # ПОСЛЕ жирного/курсива: иначе '**' внутри цитаты экранируется раньше
+    # и разметка внутри цитат умирает (баг «цитаты не работают»).
+    # Строка-цитата — та, что начинается с &gt; (с пробелом или без);
+    # вложенная разметка внутри уже готова — не трогаем её.
+    lines = text.split('\n')
+    out_lines: list[str] = []
+    quote_buf: list[str] = []
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith('&gt;'):
+            rest = stripped[4:]
+            if rest.startswith(' '):
+                rest = rest[1:]
+            quote_buf.append(rest)
+        else:
+            if quote_buf:
+                out_lines.append('<blockquote>' + '\n'.join(quote_buf) + '</blockquote>')
+                quote_buf = []
+            out_lines.append(line)
+    if quote_buf:
+        out_lines.append('<blockquote>' + '\n'.join(quote_buf) + '</blockquote>')
+    text = '\n'.join(out_lines)
 
     # Ссылки [text](url): разрешаем https://, tg://, t.me/..., @user
     def _link(m: 're.Match') -> str:

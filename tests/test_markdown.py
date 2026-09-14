@@ -71,6 +71,17 @@ def test_quote_with_markdown_inside():
     assert out == '<blockquote><b>b</b></blockquote>'
 
 
+def test_quote_bold_inside_italic_outside():
+    # разметка внутри цитаты работает, '>' внутри **..** — не цитата
+    assert markdown_to_html('> **b** and *i*') == '<blockquote><b>b</b> and <i>i</i></blockquote>'
+    assert markdown_to_html('**a > b**') == '<b>a &gt; b</b>'
+
+
+def test_quote_no_space_and_indented():
+    assert markdown_to_html('>hello') == '<blockquote>hello</blockquote>'
+    assert markdown_to_html('  > hi') == '<blockquote>hi</blockquote>'
+
+
 def test_link_tme_normalized():
     assert '<a href="https://t.me/x">t</a>' in markdown_to_html('[t](t.me/x)')
 

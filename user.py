@@ -832,15 +832,18 @@ def _chat_sync_on(db, chat_id: int) -> bool:
     return bool(glob and per)
 
 
-async def get_channel_slowmode(chat_id: int, db) -> int:
+async def get_channel_slowmode(chat_id: int, db, force: bool = False) -> int:
     """Слоумод канала в секундах (0 = нет). Кэшируем в БД на SLOWMODE_TTL.
-    Определяем через GetFullChannel — код сам видит КД канала."""
+
+    Определяем через GetFullChannel — код сам видит КД канала.
+    force=True — перепроверить прямо сейчас (для кнопки «Отправить сейчас»
+    и проверки при старте рассылки)."""
     cached, at = 0, 0.0
     try:
         cached, at = db.get_slowmode(chat_id)
     except Exception:
         pass
-    if at and _time.time() - at < SLOWMODE_TTL:
+    if not force and at and _time.time() - at < SLOWMODE_TTL:
         return cached
     if not await ensure_connected():
         return cached
@@ -996,6 +999,137 @@ def save_schedule(db, chat_id: int, ts: float) -> None:
         logger.error(f"Не сохранил расписание {chat_id}: {e}")
 
 
+async def _collect_post(chat_id: int, db):
+    """Собрать пост чата для отправки: (text, photo_path, video_path, fwd,
+    topic_id, timeout). Единый путь для цикла и кнопки «Отправить сейчас»."""
+    try:
+        addit = db.get_additional_text(chat_id)
+        add_text = addit[0] if addit and addit[0] else ''
+    except Exception as e:
+        logger.error(f"Ошибка доп. текста {chat_id}: {e}")
+        add_text = ''
+    channel_post = db.get_channel_post(chat_id)
+    photo_path = video_path = None
+    fwd = None
+    try:
+        _fc, _fm = db.get_channel_forward(chat_id)
+        if _fc and _fm:
+            fwd = (int(_fc), int(_fm))
+    except Exception:
+        fwd = None
+    try:
+        settings = db.settings()
+    except Exception:
+        settings = None
+    if channel_post and (channel_post[0] or channel_post[1] or channel_post[2]):
+        text = channel_post[2] or ''
+        if add_text:
+            text = f"{text}\n\n{add_text}" if text else add_text
+        if channel_post[0]:
+            photo_path = f"{config.DIR}{channel_post[0]}" if config.DIR else channel_post[0]
+        elif channel_post[1]:
+            video_path = f"{config.DIR}{channel_post[1]}" if config.DIR else channel_post[1]
+    else:
+        text = (settings[3] if settings else '') or ''
+        if add_text:
+            text = f"{text}\n\n{add_text}" if text else add_text
+        if settings and settings[1]:
+            photo_path = f"{config.DIR}{settings[1]}" if config.DIR else settings[1]
+        elif settings and settings[2]:
+            video_path = f"{config.DIR}{settings[2]}" if config.DIR else settings[2]
+        if fwd is None and settings and len(settings) > 7 and settings[6] and settings[7]:
+            try:
+                fwd = (int(settings[6]), int(settings[7]))
+            except (TypeError, ValueError):
+                fwd = None
+    try:
+        topic_id, _topic_name = db.get_topic(chat_id)
+    except Exception:
+        topic_id = 0
+    try:
+        topic_id = int(topic_id or 0)
+    except (TypeError, ValueError):
+        topic_id = 0
+    try:
+        per_chat = db.get_channel_timeout(chat_id)
+    except Exception:
+        per_chat = None
+    try:
+        default_timeout = int((settings[5] if settings and len(settings) > 5 else 5) or 5)
+        if default_timeout < 1:
+            default_timeout = 5
+    except (TypeError, ValueError):
+        default_timeout = 5
+    timeout = per_chat if per_chat and per_chat >= 1 else default_timeout
+    return text, photo_path, video_path, fwd, topic_id, timeout
+
+
+async def send_now(chat_id: int, db):
+    """Ручная отправка вне очереди («Отправить сейчас»).
+
+    Проверяем КД/слоумод ПЕРЕД отправкой (свежий опрос, не кэш): если чат
+    на КД — не шлём и возвращаем (False, 'ждёт ~N'). Если отправилось —
+    КД взводим с нуля (сейчас + delay). Не отправилось — КД НЕ трогаем.
+    Возвращает (ok, detail)."""
+    chat_id = int(chat_id)
+    if not await ensure_connected():
+        return False, 'Pyrogram не подключён — войди через /login'
+    try:
+        slow = await get_channel_slowmode(chat_id, db, force=True)
+    except (FloodWait, asyncio.CancelledError):
+        raise
+    except Exception:
+        slow = 0
+    sync_on = _chat_sync_on(db, chat_id)
+    try:
+        per_chat = db.get_channel_timeout(chat_id)
+    except Exception:
+        per_chat = None
+    try:
+        settings = db.settings()
+        default_timeout = int((settings[5] if settings and len(settings) > 5 else 5) or 5)
+    except (TypeError, ValueError, AttributeError):
+        default_timeout = 5
+    timeout = per_chat if per_chat and per_chat >= 1 else default_timeout
+    delay = _effective_delay(timeout, slow, sync_on)
+    try:
+        nxt = float(db.get_send_next(chat_id) or 0)
+    except Exception:
+        nxt = 0
+    now = _time.time()
+    if nxt > now:
+        left = int(nxt - now)
+        return False, f'КД: ждать ~{left // 60} мин {left % 60}с (впритык {delay}с)'
+    text, photo_path, video_path, fwd, topic_id, _t = await _collect_post(chat_id, db)
+    try:
+        mention = await build_mentions(chat_id, db)
+    except Exception as e:
+        logger.error(f"Отметки для {chat_id}: {e}")
+        mention = ''
+    try:
+        ok, err, _tries = await _send_with_retries(
+            chat_id, text, photo_path, video_path,
+            fwd=fwd, topic=topic_id, mention=mention)
+    except FloodWait as e:
+        wait = int(getattr(e, 'value', 30) or 30)
+        register_send_result(db, chat_id, False, f'FloodWait {wait}s, повтор позже')
+        return False, f'FloodWait {wait}с — попробуй позже (КД не тронут)'
+    if not ok:
+        register_send_result(db, chat_id, False, err)
+        return False, f'{err} (КД не тронут)'
+    register_send_result(db, chat_id, True, '')
+    ts = _time.time() + delay
+    save_schedule(db, chat_id, ts)
+    try:
+        await _log_send(db, {'id': chat_id, 'title': str(chat_id)},
+                        text, photo_path, video_path, fwd=fwd)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.warning(f"Лог не записался для {chat_id}: {e}")
+    return True, f'следующая через ~{delay // 60} мин'
+
+
 def _plan_sends(roster, statuses, next_at, now):
     """Чистая функция планировщика.
 
@@ -1031,6 +1165,25 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
     next_at: Dict[int, float] = load_schedule(db, [c['id'] for c in roster])
     if next_at:
         logger.info(f"Расписание восстановлено из БД для {len(next_at)} чатов")
+    # Проверка при запуске: можно ли отправлять (КД/слоумод свежие, а не
+    # часовой кэш). Для due-чатов освежаем слоумод принудительно — иначе
+    # «впритык» работает по вчерашним цифрам и шлёт раньше КД канала.
+    try:
+        _settings0 = db.settings()
+        _on = bool(_settings0 and _settings0[4] == 1)
+    except Exception:
+        _on = True
+    if _on:
+        now0 = _time.time()
+        for c in roster:
+            try:
+                if next_at.get(c['id'], 0) > now0:
+                    continue  # чат на КД — дёргать API смысла нет
+                await get_channel_slowmode(c['id'], db, force=True)
+            except (FloodWait, asyncio.CancelledError):
+                raise
+            except Exception:
+                pass
     try:
         while True:
             try:
@@ -1116,56 +1269,12 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                     pass
 
                 try:
-                    channel_post = db.get_channel_post(chat['id'])
-                    photo_path = video_path = None
-                    fwd = None
-                    try:
-                        _fc, _fm = db.get_channel_forward(chat['id'])
-                        if _fc and _fm:
-                            fwd = (int(_fc), int(_fm))
-                    except Exception:
-                        fwd = None
-                    if channel_post and (channel_post[0] or channel_post[1] or channel_post[2]):
-                        text = channel_post[2] or ''
-                        if chat.get('text'):
-                            text = f"{text}\n\n{chat['text']}" if text else chat['text']
-                        if channel_post[0]:
-                            photo_path = f"{config.DIR}{channel_post[0]}" if config.DIR else channel_post[0]
-                        elif channel_post[1]:
-                            video_path = f"{config.DIR}{channel_post[1]}" if config.DIR else channel_post[1]
-                    else:
-                        # settings: [0]=ID, [1]=PHOTO, [2]=VIDEO, [3]=TEXT, [4]=SPAM, [5]=TIMEOUT,
-                        # [6]=FWD_CHAT, [7]=FWD_MSG
-                        text = settings[3] or ''
-                        if chat.get('text'):
-                            text = f"{text}\n\n{chat['text']}" if text else chat['text']
-                        if settings[1]:
-                            photo_path = f"{config.DIR}{settings[1]}" if config.DIR else settings[1]
-                        elif settings[2]:
-                            video_path = f"{config.DIR}{settings[2]}" if config.DIR else settings[2]
-                        if fwd is None and len(settings) > 7 and settings[6] and settings[7]:
-                            try:
-                                fwd = (int(settings[6]), int(settings[7]))
-                            except (TypeError, ValueError):
-                                fwd = None
-
-                    # Индивидуальный таймаут чата, иначе глобальный
-                    try:
-                        per_chat = db.get_channel_timeout(chat['id'])
-                    except Exception:
-                        per_chat = None
-                    timeout = per_chat if per_chat and per_chat >= 1 else default_timeout
-
-                    # Тема форума (0 = General) и слоумод канала (КД впритык)
-                    try:
-                        topic_id, _topic_name = db.get_topic(chat['id'])
-                    except Exception:
-                        topic_id = 0
-                    try:
-                        topic_id = int(topic_id or 0)
-                    except (TypeError, ValueError):
-                        topic_id = 0
-                    slow = await get_channel_slowmode(chat['id'], db)
+                    # Пост собираем единым путём (тот же, что у «Отправить сейчас»)
+                    text, photo_path, video_path, fwd, topic_id, timeout = \
+                        await _collect_post(chat['id'], db)
+                    # Впритык: слоумод свежий, а не часовой кэш — иначе шлём
+                    # раньше КД канала и ловим SLOWMODE_WAIT
+                    slow = await get_channel_slowmode(chat['id'], db, force=True)
                     sync_on = _chat_sync_on(db, chat['id'])
                     delay = _effective_delay(timeout, slow, sync_on)
 
@@ -1187,15 +1296,21 @@ async def spamming(spam_list: List[Dict[str, Any]], settings: tuple, db) -> None
                         next_at[chat['id']] = _time.time() + wait
                         save_schedule(db, chat['id'], next_at[chat['id']])
                         continue
-                    next_at[chat['id']] = _time.time() + delay
-                    save_schedule(db, chat['id'], next_at[chat['id']])
                     disabled = register_send_result(db, chat['id'], ok, err)
                     if not ok:
+                        # НЕ отправилось — КД НЕ обновляем: чат остаётся due
+                        # и попробует снова на следующем витке планировщика.
+                        # (Раньше КД взводился и при ошибке — чат «засыпал»
+                        # на весь интервал, хотя ничего не ушло.)
                         logger.error(f"Ошибка отправки в {chat['id']} после {tries} попыток: {err}")
                         if disabled:
                             await notify_admin(
                                 f'⛔ Чат {chat["id"]} выключен из рассылки: {err}')
                     else:
+                        # Отправилось — КД с нуля: следующий дедлайн = сейчас + delay
+                        # (delay уже учитывает впритык к слоумоду)
+                        next_at[chat['id']] = _time.time() + delay
+                        save_schedule(db, chat['id'], next_at[chat['id']])
                         logger.info(f"Отправлено в {chat['id']} с {tries} попытки, "
                                     f"следующее через {delay}с"
                                     + (f" (тема {topic_id})" if topic_id else "")

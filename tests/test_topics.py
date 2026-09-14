@@ -133,6 +133,143 @@ def test_slowmode_api_error_returns_cached(monkeypatch):
     assert run(user.get_channel_slowmode(-1, db)) == 45
 
 
+def test_slowmode_force_ignores_fresh_cache(monkeypatch):
+    from unittest.mock import AsyncMock
+    db = StubDB()
+    db.store[-1] = (30, _t.time())  # свежий кэш
+    stub = SlowClient(seconds=120)
+    monkeypatch.setattr(user, 'client', stub)
+    monkeypatch.setattr(user, 'ensure_connected', AsyncMock(return_value=True))
+    assert run(user.get_channel_slowmode(-1, db, force=True)) == 120
+    assert stub.invokes == 1  # force — перепроверяем несмотря на свежесть
+
+
+class SendNowDB:
+    """Минимальная БД для send_now: пост, таймауты, расписание, статусы."""
+
+    def __init__(self):
+        self.post = ('', '', 'hi')
+        self.timeout = 5
+        self.send_next = 0.0
+        self.saved_next = {}
+        self.status = {}
+
+    def get_channel_post(self, cid):
+        return self.post
+
+    def get_channel_forward(self, cid):
+        return 0, 0
+
+    def get_additional_text(self, cid):
+        return ('',)
+
+    def settings(self):
+        return (1, '', '', 'global', 1, 5, 0, 0)
+
+    def get_topic(self, cid):
+        return 0, ''
+
+    def get_channel_timeout(self, cid):
+        return self.timeout
+
+    def get_send_next(self, cid):
+        return self.send_next
+
+    def set_send_next(self, cid, ts):
+        self.saved_next[cid] = ts
+        self.send_next = ts
+        return True
+
+    def get_slowmode(self, cid):
+        return 0, 0.0
+
+    def set_slowmode(self, cid, sec):
+        return True
+
+    def get_sync_slowmode(self):
+        return 1
+
+    def get_sync_slow(self, cid):
+        return 1
+
+    def get_tag_all(self, cid):
+        return 0
+
+    def stop_spam_for_channel(self, cid):
+        return True
+
+
+class SendNowClient:
+    def __init__(self, ok=True):
+        self.ok = ok
+        self.calls = []
+
+    async def resolve_peer(self, cid):
+        from types import SimpleNamespace as _NS
+        return _NS()
+
+    async def invoke(self, req):
+        from types import SimpleNamespace as _NS
+        return _NS(full_chat=_NS(slowmode_seconds=0))
+
+    async def send_message(self, chat_id, text, parse_mode=None, reply_to_message_id=None):
+        self.calls.append(text)
+        return True
+
+    async def get_users(self, ids):
+        return []
+
+
+def test_send_now_success_resets_cooldown(monkeypatch):
+    from unittest.mock import AsyncMock
+    db = SendNowDB()
+    stub = SendNowClient(ok=True)
+    monkeypatch.setattr(user, 'client', stub)
+    monkeypatch.setattr(user, 'ensure_connected', AsyncMock(return_value=True))
+    ok, detail = run(user.send_now(-10, db))
+    assert ok is True
+    assert -10 in db.saved_next and db.saved_next[-10] > _t.time()
+    assert stub.calls == ['hi']
+
+
+def test_send_now_blocked_by_cooldown(monkeypatch):
+    from unittest.mock import AsyncMock
+    db = SendNowDB()
+    db.send_next = _t.time() + 300  # КД ещё висит
+    stub = SendNowClient(ok=True)
+    monkeypatch.setattr(user, 'client', stub)
+    monkeypatch.setattr(user, 'ensure_connected', AsyncMock(return_value=True))
+    ok, detail = run(user.send_now(-10, db))
+    assert ok is False and 'КД' in detail
+    assert stub.calls == []  # не слали
+    assert db.saved_next == {}  # КД не тронут
+
+
+def test_send_now_failure_keeps_cooldown(monkeypatch):
+    from unittest.mock import AsyncMock
+    db = SendNowDB()
+    stub = SendNowClient(ok=False)
+
+    async def boom(*a, **k):
+        raise RuntimeError('chat_write_forbidden')
+
+    stub.send_message = boom
+    monkeypatch.setattr(user, 'client', stub)
+    monkeypatch.setattr(user, 'ensure_connected', AsyncMock(return_value=True))
+    monkeypatch.setattr(user, 'RETRY_DELAY_SEC', 0)
+    ok, detail = run(user.send_now(-10, db))
+    assert ok is False
+    assert db.saved_next == {}  # не отправилось — КД не трогаем
+
+
+def test_send_now_button_present():
+    kb = main.get_chat_settings_keyboard(-1)
+    cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert 'SEND_NOW:-1' in cbs
+    import inspect
+    assert 'SEND_NOW:' in inspect.getsource(main.callback_handler)
+
+
 class TopicClient:
     def __init__(self, topics=None, fail=False):
         self.topics = topics or []

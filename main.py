@@ -342,6 +342,52 @@ async def send_post_preview(chat_id: int, media_path: str | None, text_html: str
             await bot.send_message(chat_id, chunk, parse_mode=ParseMode.HTML)
 
 
+async def _send_post_preview(to_chat_id: int, chat_id: int) -> None:
+    """Предпросмотр поста чата ТЕМ ЖЕ путём, что и рассылка: единый конвертер
+    user._to_html (маркер + tg-spoiler + склейка). Раньше превью шло через
+    голый markdown_to_html — цитаты/склейка в нём отличались от реальной
+    отправки, отсюда «превью красивое, а в чате плоско» и наоборот."""
+    post_data = db.get_channel_post(chat_id)
+    try:
+        fwd_chat, fwd_msg = db.get_channel_forward(chat_id)
+    except Exception:
+        fwd_chat, fwd_msg = 0, 0
+    has_fwd = bool(fwd_chat and fwd_msg)
+    if not post_data or not (post_data[0] or post_data[1] or post_data[2] or has_fwd):
+        await bot.send_message(to_chat_id, 'Пост не установлен')
+        return
+    photo, video, text = post_data
+    text_html = user._to_html(text) if text else ''
+    if has_fwd:
+        ok, err = await preview_forward(to_chat_id, fwd_chat, fwd_msg)
+        if not ok:
+            await bot.send_message(
+                to_chat_id,
+                f'📨 Пересылка {fwd_chat}:{fwd_msg} (показать не вышло: {html.escape(err)})'
+                + (f'\n{text_html}' if text_html else ''),
+                parse_mode=ParseMode.HTML)
+        elif text_html:
+            for chunk in split_html(text_html):
+                await bot.send_message(to_chat_id, chunk, parse_mode=ParseMode.HTML)
+    elif photo:
+        found = resolve_media_path(photo)
+        if found:
+            await send_post_preview(to_chat_id, found, text_html)
+        else:
+            await bot.send_message(to_chat_id, f'Фото не найдено на диске.\n{text_html}',
+                                   parse_mode=ParseMode.HTML)
+    elif video:
+        found = resolve_media_path(video)
+        if found:
+            await send_post_preview(to_chat_id, found, text_html, is_video=True)
+        else:
+            await bot.send_message(to_chat_id, f'Видео не найдено на диске.\n{text_html}',
+                                   parse_mode=ParseMode.HTML)
+    elif text_html:
+        for chunk in split_html(text_html):
+            await bot.send_message(to_chat_id, chunk, parse_mode=ParseMode.HTML)
+
+
 def _short(text: str, limit: int = 60) -> str:
     text = (text or '').replace('\n', ' ').strip()
     return text if len(text) <= limit else text[:limit - 1] + '…'
@@ -666,6 +712,9 @@ def get_chat_settings_keyboard(chat_id):
         [InlineKeyboardButton(text=f'⏱ Интервал: {timeout_val} мин.', callback_data=f'CHANGE_TIMEOUT:{chat_id}')],
         [InlineKeyboardButton(text='💬 Доп. текст', callback_data=f'ADD_ADDITIONAL:{chat_id}')],
     ]
+    # Ручной пуск вне очереди: отправилось — КД с нуля, нет — КД не трогаем
+    rows.append([InlineKeyboardButton(text='🚀 Отправить сейчас', callback_data=f'SEND_NOW:{chat_id}',
+                                      style=ButtonStyle.SUCCESS)])
     try:
         addit = db.get_additional_text(chat_id)
         if addit and addit[0]:
@@ -1718,6 +1767,30 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
                                   parse_mode=ParseMode.HTML)
         await c.answer()
 
+    elif data.startswith('SEND_NOW:'):
+        chat_id = int(data.split(':')[1])
+        await c.answer('🚀 Отправляю…')
+        try:
+            ok, detail = await user.send_now(chat_id, db)
+        except Exception as e:
+            logger.exception('SEND_NOW упал')
+            await c.message.edit_text(
+                f'{_chat_link(chat_id)}\n❌ Ошибка ручной отправки: {html.escape(str(e))}',
+                reply_markup=get_chat_settings_keyboard(chat_id),
+                parse_mode=ParseMode.HTML)
+            return
+        try:
+            await c.message.edit_text(format_chat_info(chat_id),
+                                      reply_markup=get_chat_settings_keyboard(chat_id),
+                                      parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+        if ok:
+            await c.answer(f'🚀 Отправлено ({detail})', show_alert=True)
+        else:
+            await c.answer(f'❌ Не отправилось: {detail}. КД не тронут.',
+                           show_alert=True)
+
     elif data == 'ADD_CHAT':
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text='🔢 По ID', callback_data='INPUT_CHAT_ID')],
@@ -1941,47 +2014,7 @@ async def callback_handler(c: CallbackQuery, state: FSMContext):
 
     elif data.startswith('VIEW_CHANNEL_POST:'):
         chat_id = int(data.split(':')[1])
-        post_data = db.get_channel_post(chat_id)
-        try:
-            fwd_chat, fwd_msg = db.get_channel_forward(chat_id)
-        except Exception:
-            fwd_chat, fwd_msg = 0, 0
-        has_fwd = bool(fwd_chat and fwd_msg)
-        if not post_data or not (post_data[0] or post_data[1] or post_data[2] or has_fwd):
-            await c.answer('Пост не установлен', show_alert=True)
-            return
-        photo, video, text = post_data
-        text_html = markdown_to_html(text) if text else ''
-        try:
-            if has_fwd:
-                ok, err = await preview_forward(c.message.chat.id, fwd_chat, fwd_msg)
-                if not ok:
-                    await bot.send_message(
-                        c.message.chat.id,
-                        f'📨 Пересылка {fwd_chat}:{fwd_msg} (показать не вышло: {html.escape(err)})'
-                        + (f'\n{text_html}' if text_html else ''),
-                        parse_mode=ParseMode.HTML)
-                elif text_html:
-                    for chunk in split_html(text_html):
-                        await bot.send_message(c.message.chat.id, chunk, parse_mode=ParseMode.HTML)
-            elif photo:
-                found = resolve_media_path(photo)
-                if found:
-                    await send_post_preview(c.message.chat.id, found, text_html)
-                else:
-                    await bot.send_message(c.message.chat.id, f'Фото не найдено на диске.\n{text_html}', parse_mode=ParseMode.HTML)
-            elif video:
-                found = resolve_media_path(video)
-                if found:
-                    await send_post_preview(c.message.chat.id, found, text_html, is_video=True)
-                else:
-                    await bot.send_message(c.message.chat.id, f'Видео не найдено на диске.\n{text_html}', parse_mode=ParseMode.HTML)
-            elif text_html:
-                for chunk in split_html(text_html):
-                    await bot.send_message(c.message.chat.id, chunk, parse_mode=ParseMode.HTML)
-        except Exception as e:
-            await c.answer(f'Ошибка просмотра: {e}', show_alert=True)
-            return
+        await _send_post_preview(c.message.chat.id, chat_id)
         await c.answer()
 
     elif data.startswith('CHANNEL_EDIT_TEXT:'):
