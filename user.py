@@ -71,7 +71,11 @@ async def start_client() -> bool:
         logger.info(f"Pyrogram запущен как {me.first_name} ({me.phone_number})")
         return True
     except asyncio.TimeoutError:
-        logger.error("Таймаут запуска Pyrogram (30с). Сессия битая? Удали session.session и войди через /login.")
+        # Таймаут на старте: в 9 из 10 это СЕТЬ (см. pyrogram.connection
+        # warnings выше), а не битая сессия. Сессию НЕ трогаем — watchdog
+        # и повторные попытки поднимут клиент когда сеть вернётся.
+        logger.error("Таймаут запуска Pyrogram (30с) — похоже на обрыв сети, "
+                     "сессию не трогаю. Повторю автоматически.")
         try:
             await client.stop()
         except Exception:
@@ -81,7 +85,17 @@ async def start_client() -> bool:
     except AuthKeyUnregistered:
         logger.error("AuthKeyUnregistered. Удаляю сессию...")
         await _delete_session()
-        await notify_admin("Сессия недействительна. Отправь /login чтобы войти заново.")
+        # Сам открываем окно входа: сессия точно мертва, ждать нечего
+        try:
+            if bot_instance is not None:
+                from main import _offer_login as _mb_offer
+                import config as _cfg
+                await _mb_offer(_cfg.ADMINS[0],
+                                '🔑 Сессия недействительна — удалил её сам.')
+            else:
+                await notify_admin("Сессия недействительна. Отправь /login чтобы войти заново.")
+        except Exception:
+            await notify_admin("Сессия недействительна. Отправь /login чтобы войти заново.")
         return False
     except Exception as e:
         logger.error(f"Ошибка запуска клиента: {e}")
@@ -151,7 +165,16 @@ async def get_chats(force: bool = False) -> List[Dict[str, Any]]:
                 })
     except AuthKeyUnregistered:
         await _delete_session()
-        await notify_admin("Сессия недействительна. Отправь /login для входа.")
+        try:
+            if bot_instance is not None:
+                from main import _offer_login as _mb_offer2
+                import config as _cfg2
+                await _mb_offer2(_cfg2.ADMINS[0],
+                                 '🔑 Сессия недействительна — удалил её сам.')
+            else:
+                await notify_admin("Сессия недействительна. Отправь /login для входа.")
+        except Exception:
+            await notify_admin("Сессия недействительна. Отправь /login для входа.")
     except Exception as e:
         logger.error(f"Ошибка получения чатов: {e}")
         if _chats_cache['data']:
@@ -180,15 +203,33 @@ async def do_login(phone: str) -> Optional[str]:
     await _delete_session()
     client = make_client()
     try:
-        await client.connect()
+        # Вход тоже может упереться в сеть — ограничиваем, иначе бот висит.
+        # connect() без таймаута при мёртвой сети висит минутами.
+        await asyncio.wait_for(client.connect(), timeout=30)
+    except asyncio.TimeoutError:
+        logger.error("Таймаут подключения для отправки кода (30с) — проверь сеть/VPN.")
+        login_error = "Нет соединения с Telegram (таймаут 30с). Проверь сеть и попробуй снова."
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        return None
     except Exception as e:
         logger.error(f"Ошибка подключения для отправки кода: {e}")
         login_error = str(e)
         return None
     try:
-        sent = await client.send_code(phone)
+        sent = await asyncio.wait_for(client.send_code(phone), timeout=30)
         phone_code_hash = sent.phone_code_hash
         return sent.phone_code_hash
+    except asyncio.TimeoutError:
+        logger.error("Таймаут отправки кода (30с) — сеть.")
+        login_error = "Нет соединения с Telegram (таймаут 30с). Проверь сеть и попробуй снова."
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        return None
     except FloodWait as e:
         wait = int(getattr(e, 'value', 0) or 0)
         logger.error(f"FloodWait при отправке кода: {wait}s")

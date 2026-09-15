@@ -3010,6 +3010,37 @@ async def start_spam_loop() -> int:
     return len(enabled)
 
 
+async def _offer_login(admin_id: int, reason: str) -> None:
+    """Окно входа само: чистим битую сессию (если она причина) и открываем
+    ввод телефона через то же состояние, что и /login. Вызываем только когда
+    точно знаем, что дело в сессии, а не в сети."""
+    try:
+        await user._delete_session()
+    except Exception:
+        pass
+    user.login_phone = None
+    user.login_password = None
+    try:
+        prompt = await bot.send_message(
+            admin_id,
+            f'{reason}\n\n📱 Введи номер телефона (в формате +79001234567):\n\n/cancel — отмена.',
+            reply_markup=cancel_kb())
+    except Exception:
+        return
+    try:
+        from aiogram.fsm.storage.base import StorageKey
+        # Кладём состояние напрямую админу: следующий ввод пойдёт как телефон.
+        # Работает и без активного апдейта — dispatcher подхватит по chat/user.
+        state = FSMContext(storage=dp.storage,
+                           key=StorageKey(chat_id=admin_id, user_id=admin_id,
+                                          bot_id=bot.id))
+        await state.update_data({'prompt_id': prompt.message_id,
+                                 'auto_login': True})
+        await state.set_state(login_phone.phone)
+    except Exception as e:
+        logger.warning(f"Не смог открыть автовход: {e}")
+
+
 async def main():
     global _wd_started
     logger.info(f"Autoposter {get_version()} стартует. Админы: {config.ADMINS}")
@@ -3023,7 +3054,21 @@ async def main():
     connected = await user.start_client()
     startup_info['pyro_ok'] = connected
     if not connected:
-        logger.warning("Pyrogram не подключен. Используй /login для входа.")
+        # Сессии нет вообще — дело точно не в сети: сразу открываем вход.
+        # Сеть упала, а сессия есть — НЕ трогаем: watchdog поднимет сам.
+        try:
+            has_session = os.path.exists('session.session')
+        except Exception:
+            has_session = True
+        if not has_session:
+            logger.warning("Сессии нет — открываю окно входа сам.")
+            try:
+                await _offer_login(config.ADMINS[0],
+                                   '🔑 Вход не выполнен — введи номер, бот сам продолжит.')
+            except Exception as e:
+                logger.warning(f"Не смог открыть автовход: {e}")
+        else:
+            logger.warning("Pyrogram не подключен (похоже на сеть) — жду, watchdog поднимет. /login — вручную.")
     # Если спам был включён до перезапуска — возобновляем
     try:
         if db.settings()[4] == 1:

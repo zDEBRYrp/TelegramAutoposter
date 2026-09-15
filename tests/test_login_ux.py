@@ -33,3 +33,25 @@ def test_deny_logs_user_id():
     src = inspect.getsource(main._deny_if_not_admin)
     assert 'Отказ в доступе' in src
     assert 'uid=' in src
+
+
+def test_start_timeout_keeps_session():
+    """Таймаут на старте = сеть, а не битая сессия: файл не удаляем."""
+    src = inspect.getsource(main.user.start_client)
+    assert '_delete_session' not in src.split('TimeoutError')[1].split('AuthKeyUnregistered')[0]
+
+
+def test_auth_key_opens_login_itself():
+    src = inspect.getsource(main.user.start_client)
+    assert '_offer_login' in src  # окно входа само, а не «отправь /login»
+
+
+def test_login_connect_has_timeout():
+    src = inspect.getsource(main.user.do_login)
+    assert 'wait_for' in src and '30' in src
+
+
+def test_main_opens_login_when_no_session():
+    src = inspect.getsource(main.main)
+    assert '_offer_login' in src
+    assert 'session.session' in src
